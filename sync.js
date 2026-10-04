@@ -324,6 +324,19 @@ const CloudSync = {
             throw e;
         }
     },
+    // Custom phrases replace the whole cloud field (see saveCustomPhrases in
+    // firebase-init.js) so that deletions propagate too.
+    async pushCustomPhrases(customPhrases, customPhrasesUpdatedAt) {
+        if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
+        try {
+            if (window.CubeSync?.saveCustomPhrases) await window.CubeSync.saveCustomPhrases(customPhrases, customPhrasesUpdatedAt);
+            else await window.CubeSync.saveSessionsMeta({ customPhrases, customPhrasesUpdatedAt });
+            return true;
+        } catch (e) {
+            console.error('CloudSync.pushCustomPhrases failed:', e);
+            return false;
+        }
+    },
     async pushMeta(meta) {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
         try {
@@ -904,7 +917,7 @@ const AppSync = {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
         const customPhrases = AppStorage.getJSON('customPhrases', {});
         const customPhrasesUpdatedAt = Number(AppStorage.getRaw('customPhrasesUpdatedAt', '0')) || Date.now();
-        return CloudSync.pushMeta({ customPhrases, customPhrasesUpdatedAt });
+        return CloudSync.pushCustomPhrases(customPhrases, customPhrasesUpdatedAt);
     },
 
     // Progression is written only when its content differs from what was last

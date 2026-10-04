@@ -413,6 +413,23 @@ window.CubeSync = {
   // маленький документ, который почти не растёт и меняется редко
   // (создание/переименование/удаление сессии), в отличие от истории
   // сборок.
+  // Фразы комментатора записываются ЦЕЛИКОМ (mergeFields заменяет поле
+  // customPhrases полностью). Обычный setDoc(..., {merge:true}) сливает
+  // вложенные карты по ключам: когда удалялась последняя фраза категории,
+  // ключ категории пропадал локально, но в облаке оставался со старым
+  // списком — удаление не доезжало до других устройств (и фраза
+  // "воскресала" при следующей синхронизации).
+  saveCustomPhrases: async (customPhrases, customPhrasesUpdatedAt) => {
+    const user = auth.currentUser;
+    if (!user) throw new Error("Пользователь не авторизован");
+    await setDoc(
+      doc(db, "users", user.uid),
+      { customPhrases, customPhrasesUpdatedAt },
+      { mergeFields: ["customPhrases", "customPhrasesUpdatedAt"] }
+    );
+    usageBump("writes");
+  },
+
   saveSessionsMeta: async (meta) => {
     const user = auth.currentUser;
     if (!user) return;
