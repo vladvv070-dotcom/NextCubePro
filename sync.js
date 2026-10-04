@@ -3,44 +3,79 @@
    Merge-by-id with tombstones, so signing in on a second device
    never overwrites/loses solves -- it combines both.
 
-   HOW IT WORKS (per-solve model, not one big blob)
-   - Firestore layout: users/{uid} holds only small, rarely-changing
-     metadata (nickname, email, session names/disciplines, current
-     session id). The actual solve history lives one-document-per-solve
-     in users/{uid}/solves/{solveId}, plus users/{uid}/tombstones/{id}
-     for deletions.
-   - The FULL solve history is only ever read from Firestore once per
-     account+device -- the very first time AppSync.runSync() runs with
-     no local "lastSyncedAt" marker yet. Every sync after that (which,
-     since Firebase restores the session on every page load, means
-     basically every visit) pulls a DELTA instead: only solves/
-     tombstones with updatedAt/deletedAt newer than the marker
-     (CloudSync.pullSolvesDelta / CubeSync.loadSolvesSince in
-     firebase-init.js). This is what keeps a heavy user (thousands of
-     solves) from re-reading their entire history, and therefore
-     burning through the daily read quota, on every single page load --
-     read cost now tracks how much actually changed since last visit,
-     not how much history has piled up. Writes were already point
-     writes (new solve, DNF/+2/edit, delete = exactly one Firestore
-     write/update/delete each) and remain so.
-   - Anything that fails to push (offline, transient error) is queued
-     in PendingSync and retried at the top of the next runSync(), since
-     a delta sync can no longer notice "missing" solves by diffing
-     against the full remote list the way a full sync can.
-   - Stats (Ao5/Ao12/Ao100, best, charts) are always computed from
-     the in-memory `timer.sessions[...].solves` array -- never by
-     querying Firestore. That was already true before this file was
-     rewritten and remains true here; this file only changes how
-     solves get in and out of Firestore, not how they're read for
-     display.
-   - Deleting a solve doesn't just remove it locally -- its id also
-     gets recorded in a tombstone (see SyncTombstones below), so a
-     merge never resurrects something you deleted on purpose, even
-     if an older copy of it still exists elsewhere.
-   - Editing a solve (DNF/+2/manual edit) stamps `updatedAt`. If the
-     same solve id was edited differently on two devices, the merge
-     (at next sign-in) keeps whichever edit has the newer `updatedAt`.
+   FIRESTORE LAYOUT
+   - users/{uid}: small metadata only (nickname, email, session names/
+     disciplines, current session id, progression, custom phrases).
+   - users/{uid}/solves/{solveId}: one document per solve.
+   - users/{uid}/tombstones/{solveId}: remembers deletions.
+
+   WHAT COSTS READS / WRITES (free quota: 50k reads / 20k writes per day)
+   - Idle app = 0 operations. There is NO polling timer any more: a sync
+     runs on page load / login, and afterwards only when the tab regains
+     focus AND at least SYNC_MIN_INTERVAL_MS passed since the last one.
+   - A sync = ~1 read for users/{uid} (served by the live listener, so
+     only the very first one is billed) + 1 query on solves + 1 query on
+     tombstones (an empty query is billed as 1 read). Only documents
+     changed since the stored cursor are returned.
+   - The FULL history is read once per account+device (no cursor yet), or
+     when the local solve count dropped for a reason nobody explains.
+   - A solve = 1 write (create) / 1 write (DNF, +2, edit) / 2 writes
+     (delete = delete + tombstone). Nothing else is written per solve.
+   - Metadata / progression / phrases are written only when their
+     content really changed (content hash), and debounced.
+   - Resetting a session = 1 metadata write (`resetAt` marker), NOT one
+     delete per solve. Solves older than `resetAt` are ignored everywhere.
+   - Stats (Ao5/Ao12/Ao100, best, charts) are computed from the in-memory
+     `timer.sessions[...].solves`, never by querying Firestore.
    ============================================================ */
+
+// Minimum gap between two *automatic* syncs (focus / visibility / online).
+// Login, page load and the "Sync now" button always sync immediately.
+const SYNC_MIN_INTERVAL_MS = 10 * 60 * 1000;
+// Session metadata / progression are debounced; flushed when the tab hides.
+const META_PUSH_DEBOUNCE_MS = 20000;
+const PROGRESSION_PUSH_DEBOUNCE_MS = 15000;
+// Local safety snapshot is refreshed at most this often.
+const SAFETY_BACKUP_MIN_INTERVAL_MS = 10 * 60 * 1000;
+// Local solve tombstones older than this are forgotten (cloud keeps them).
+const SOLVE_TOMBSTONE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+// ---- Small helpers ----------------------------------------------------
+// JSON with sorted keys: two objects with the same content always give the
+// same string, regardless of key order (Firestore returns maps key-sorted).
+function stableStringify(value) {
+    const norm = (v) => {
+        if (Array.isArray(v)) return v.map(norm);
+        if (v && typeof v === 'object') {
+            const out = {};
+            for (const k of Object.keys(v).sort()) {
+                if (v[k] !== undefined) out[k] = norm(v[k]);
+            }
+            return out;
+        }
+        return v;
+    };
+    return JSON.stringify(norm(value));
+}
+
+function countSolves(sessions) {
+    return Object.values(sessions || {}).reduce((sum, session) => sum + (Array.isArray(session?.solves) ? session.solves.length : 0), 0);
+}
+
+// The per-account "how many solves did I have after the last sync" baseline.
+// A drop below it used to mean "something is wrong, re-read everything" --
+// but a normal delete/reset ALSO lowers the count and used to trigger a full
+// read of the entire history. Every intentional removal now lowers the
+// baseline by the same amount, so only unexplained drops count.
+function adjustLocalCountBaseline(delta) {
+    if (!delta) return;
+    const uid = AppStorage.getRaw('lastSyncedUid');
+    if (!uid) return;
+    const key = `syncLocalSolveCount:${uid}`;
+    const current = AppStorage.getRaw(key, null);
+    if (current === null) return;
+    AppStorage.setRaw(key, String(Math.max(0, (Number(current) || 0) + delta)));
+}
 
 // ---- Tombstones: remember what was intentionally deleted -------------
 const SyncTombstones = {
@@ -49,12 +84,17 @@ const SyncTombstones = {
         const list = AppStorage.getJSON('deletedSolveIds', []);
         list.push({ id, deletedAt: Date.now() });
         AppStorage.setJSON('deletedSolveIds', list);
+        adjustLocalCountBaseline(-1);
     },
-    addDeletedSession(id) {
+    // removedSolveCount: how many solves disappeared together with the session
+    // (keeps the local-count baseline honest, see adjustLocalCountBaseline).
+    addDeletedSession(id, removedSolveCount = 0) {
         if (!id) return;
         const list = AppStorage.getJSON('deletedSessionIds', []);
         list.push({ id, deletedAt: Date.now() });
         AppStorage.setJSON('deletedSessionIds', list);
+        adjustLocalCountBaseline(-(Number(removedSolveCount) || 0));
+        PendingSync.removePendingForSession(id);
     },
     getDeletedSolveIds() {
         return new Set(AppStorage.getJSON('deletedSolveIds', []).map(x => x.id));
@@ -78,48 +118,80 @@ const SyncTombstones = {
     mergeRemoteSolveTombstones(remoteEntries) {
         const local = AppStorage.getJSON('deletedSolveIds', []);
         const byId = new Map(local.map(e => [e.id, e]));
+        let added = false;
         for (const e of (remoteEntries || [])) {
-            if (!byId.has(e.id)) byId.set(e.id, e);
+            if (!byId.has(e.id)) { byId.set(e.id, { id: e.id, deletedAt: e.deletedAt || Date.now() }); added = true; }
         }
         const merged = Array.from(byId.values());
-        AppStorage.setJSON('deletedSolveIds', merged);
+        if (added) AppStorage.setJSON('deletedSolveIds', merged);
         return merged;
     },
     mergeRemoteSessionTombstones(remoteEntries) {
         const local = AppStorage.getJSON('deletedSessionIds', []);
         const byId = new Map(local.map(e => [e.id, e]));
+        let added = false;
         for (const e of (remoteEntries || [])) {
-            if (!byId.has(e.id)) byId.set(e.id, e);
+            if (!byId.has(e.id)) { byId.set(e.id, e); added = true; }
         }
         const merged = Array.from(byId.values());
-        AppStorage.setJSON('deletedSessionIds', merged);
+        if (added) AppStorage.setJSON('deletedSessionIds', merged);
         return merged;
+    },
+
+    // The local solve-tombstone list otherwise grows forever. Safe to forget
+    // old entries: the deleted document no longer exists in Firestore, so it
+    // can't come back from there. SESSION tombstones are never pruned -- the
+    // deleted session's key lingers in the cloud metadata map and this is
+    // what keeps hiding it.
+    pruneOldSolveTombstones(maxAgeMs = SOLVE_TOMBSTONE_MAX_AGE_MS) {
+        const list = AppStorage.getJSON('deletedSolveIds', []);
+        const cutoff = Date.now() - maxAgeMs;
+        const kept = list.filter(e => !(Number(e.deletedAt) > 0 && Number(e.deletedAt) < cutoff));
+        if (kept.length !== list.length) AppStorage.setJSON('deletedSolveIds', kept);
     }
 };
 
 // ---- Pending push queue: solves whose write to Firestore failed --------
-// (offline, transient network error, etc.). Now that runSync() no longer
-// re-reads the full remote history on every page load (see loadSolvesSince
-// below), it can't rely on "diff local against full remote list" to catch
-// solves that silently failed to upload. Every local mutation is therefore
-// queued BEFORE its network request begins and removed only after Firestore
-// confirms the write. This also survives closing the tab while a request is
-// still in flight: localStorage already contains the retry marker.
+// Every local mutation is queued BEFORE its network request begins and
+// removed only after Firestore confirms the write. This also survives
+// closing the tab while a request is still in flight.
 const PendingSync = {
     getPendingSolves() {
         return AppStorage.getJSON('pendingSolveIds', []); // [{ sessionId, id }]
     },
+    getPendingSolveIdSet() {
+        return new Set(PendingSync.getPendingSolves().map(e => e.id));
+    },
     addPendingSolve(sessionId, id) {
         if (!id) return;
+        PendingSync.addPendingSolves([{ sessionId, id }]);
+    },
+    // Bulk variant: one read + one write of the queue for any number of ids
+    // (adding thousands one by one was quadratic).
+    addPendingSolves(entries) {
         const list = PendingSync.getPendingSolves();
-        if (!list.some(e => e.id === id)) {
-            list.push({ sessionId, id });
-            AppStorage.setJSON('pendingSolveIds', list);
+        const known = new Set(list.map(e => e.id));
+        let changed = false;
+        for (const e of (entries || [])) {
+            if (!e?.id || known.has(e.id)) continue;
+            known.add(e.id);
+            list.push({ sessionId: e.sessionId, id: e.id });
+            changed = true;
         }
+        if (changed) AppStorage.setJSON('pendingSolveIds', list);
     },
     removePendingSolve(id) {
+        PendingSync.removePendingSolves([id]);
+    },
+    removePendingSolves(ids) {
+        const drop = new Set(ids || []);
         const list = PendingSync.getPendingSolves();
-        const next = list.filter(e => e.id !== id);
+        const next = list.filter(e => !drop.has(e.id));
+        if (next.length !== list.length) AppStorage.setJSON('pendingSolveIds', next);
+    },
+    removePendingForSession(sessionId) {
+        const list = PendingSync.getPendingSolves();
+        const next = list.filter(e => e.sessionId !== sessionId);
         if (next.length !== list.length) AppStorage.setJSON('pendingSolveIds', next);
     },
     getPendingDeletes() {
@@ -137,6 +209,9 @@ const PendingSync = {
         const list = PendingSync.getPendingDeletes();
         const next = list.filter(x => x !== id);
         if (next.length !== list.length) AppStorage.setJSON('pendingDeleteIds', next);
+    },
+    hasPending() {
+        return PendingSync.getPendingSolves().length > 0 || PendingSync.getPendingDeletes().length > 0;
     },
     clearAll() {
         AppStorage.setJSON('pendingSolveIds', []);
@@ -157,16 +232,25 @@ function findSessionIdForSolve(solveId) {
 
 // ---- Merge logic (pure, no network -- safe to test standalone) -------
 const SyncMerge = {
-    // Merge two solve arrays (order doesn't matter, both are id-keyed),
-    // dropping anything in deletedSolveIds and keeping the most
-    // recently updated version of any solve that exists on both sides.
-    mergeSolves(localSolves, remoteSolves, deletedSolveIds) {
+    // Merge two solve arrays (both id-keyed), dropping anything in
+    // deletedSolveIds.
+    //
+    // Conflict rule when the same solve exists on both sides:
+    //  - pendingIds given: the cloud copy is authoritative (it is the result
+    //    of the last write that reached the server -- no client clock is
+    //    involved), EXCEPT for solves with an unsent local edit, which keep
+    //    the local copy and are pushed right after the merge.
+    //  - pendingIds omitted (legacy embedded solves only): newer `updatedAt`
+    //    wins, as before.
+    mergeSolves(localSolves, remoteSolves, deletedSolveIds, pendingIds) {
         const byId = new Map();
         for (const solve of (localSolves || [])) byId.set(solve.id, solve);
         for (const solve of (remoteSolves || [])) {
             const existing = byId.get(solve.id);
             if (!existing) {
                 byId.set(solve.id, solve);
+            } else if (pendingIds) {
+                if (!pendingIds.has(solve.id)) byId.set(solve.id, solve);
             } else {
                 const existingStamp = existing.updatedAt || existing.timestamp || 0;
                 const incomingStamp = solve.updatedAt || solve.timestamp || 0;
@@ -179,10 +263,8 @@ const SyncMerge = {
     },
 
     // Merge two session metadata dictionaries (keyed by session id).
-    // Solves are NOT part of this anymore -- they're merged separately
-    // via mergeSolves, keyed by their own sessionId field, since they
-    // now live in a flat Firestore subcollection rather than nested
-    // inside each session's blob.
+    // Solves are NOT part of this -- they're merged separately via
+    // mergeSolves, keyed by their own sessionId field.
     mergeSessionsMeta(localSessions, remoteSessions, deletedSessionIds) {
         const merged = {};
         const allIds = new Set([
@@ -200,21 +282,41 @@ const SyncMerge = {
                 // local metadata (name, discipline edits) wins on conflict;
                 // solves get overwritten below once mergeSolves runs.
                 merged[id] = { ...remote, ...local, solves: local.solves || remote.solves || [] };
+                // A reset made on ANY device must win, so take the later one.
+                const resetAt = Math.max(Number(local.resetAt) || 0, Number(remote.resetAt) || 0);
+                if (resetAt) merged[id].resetAt = resetAt;
             } else {
                 merged[id] = local || remote;
             }
             if (merged[id]) merged[id].id = id;
         }
         return merged;
+    },
+
+    // "Reset session" keeps the session but clears its solves. Instead of
+    // deleting every solve in Firestore (N writes), the session carries a
+    // `resetAt` timestamp and everything created at or before it is ignored.
+    applyResetCutoff(solves, resetAt) {
+        const cutoff = Number(resetAt) || 0;
+        if (!cutoff) return solves;
+        return (solves || []).filter(s => (Number(s?.timestamp) || 0) > cutoff);
     }
 };
 
 // ---- Cloud read/write -- talks to Firestore via firebase-init.js's CubeSync
 const CloudSync = {
     // Metadata only (nickname, session names/disciplines, current session
-    // id) -- small, rarely-changing document. NOT the solve history.
+    // id, progression, phrases) -- small document. NOT the solve history.
+    // When the live listener is running, its latest snapshot is used and the
+    // read is free; otherwise one getDoc.
     async pullMeta() {
-        if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return null;
+        const user = window.CubeAuth && window.CubeAuth.getCurrentUser();
+        if (!user) return null;
+        if (_liveMeta.ready && _liveMeta.uid === user.uid) {
+            // Deep copy: the merge code mutates what it gets, and must never
+            // touch the listener's cache.
+            return _liveMeta.data ? JSON.parse(JSON.stringify(_liveMeta.data)) : null;
+        }
         try {
             return await window.CubeSync.loadUserData();
         } catch (e) {
@@ -233,10 +335,8 @@ const CloudSync = {
         }
     },
 
-    // The ENTIRE solve history. Only called when there's no local
-    // "lastSyncedAt" marker yet for this account on this device -- i.e.
-    // the very first sync, ever, per device+account. After that, every
-    // subsequent sync uses pullSolvesDelta below instead.
+    // The ENTIRE solve history. Only called when there's no usable local
+    // cursor for this account on this device.
     async pullAllSolvesOnce() {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return { solves: [], tombstones: [] };
         try {
@@ -248,29 +348,19 @@ const CloudSync = {
     },
 
     // Only what changed (created/edited/deleted) since sinceTimestamp.
-    // This is what keeps read cost tied to recent activity instead of
-    // to the total accumulated history -- a user with 10,000 solves who
-    // last synced an hour ago still only costs a handful of reads.
+    // No "overlap" window any more: the exact-cursor query in firebase-init.js
+    // does not re-read the newest document on every sync.
     async pullSolvesDelta(sinceTimestamp) {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return { solves: [], tombstones: [] };
         try {
-            // Firestore server timestamps have millisecond precision. A small
-            // overlap prevents two writes with the same timestamp from falling
-            // exactly on the exclusive `>` cursor boundary. mergeSolves is
-            // idempotent, so re-reading a few recent documents is harmless.
-            const overlapCursor = Math.max(0, Number(sinceTimestamp || 0) - 5000);
-            return await window.CubeSync.loadSolvesSince(overlapCursor);
+            return await window.CubeSync.loadSolvesSince(Math.max(0, Number(sinceTimestamp || 0)));
         } catch (e) {
             console.error('CloudSync.pullSolvesDelta failed:', e);
             throw e;
         }
     },
 
-    // Point writes -- exactly one Firestore operation each, no re-read
-    // of the rest of the history. Failures get queued in PendingSync and
-    // retried at the top of the next runSync(), so a delta sync doesn't
-    // need to scan the full remote history to notice something never
-    // made it up (e.g. the write happened while offline).
+    // Point writes -- exactly one Firestore operation each.
     async pushNewSolve(sessionId, solve) {
         // Persist the outbox entry synchronously before starting any async
         // work. A browser may terminate an in-flight fetch without ever
@@ -289,6 +379,51 @@ const CloudSync = {
             return false;
         }
     },
+
+    // Many solves at once (backfill / retry of a long queue): batched writes,
+    // same billed cost as one-by-one but far fewer round trips. Entries are
+    // queued first, removed only after the batch committed.
+    async pushSolvesBulk(entries) {
+        if (!entries.length) return true;
+        PendingSync.addPendingSolves(entries.map(e => ({ sessionId: e.sessionId, id: e.solve.id })));
+        if (!window.CubeAuth || !window.CubeAuth.getCurrentUser() || !window.CubeSync?.saveSolvesBatch) return false;
+        const bySession = new Map();
+        for (const { sessionId, solve } of entries) {
+            if (!bySession.has(sessionId)) bySession.set(sessionId, []);
+            bySession.get(sessionId).push(solve);
+        }
+        let allOk = true;
+        for (const [sessionId, solves] of bySession) {
+            try {
+                await window.CubeSync.saveSolvesBatch(sessionId, solves);
+                PendingSync.removePendingSolves(solves.map(s => s.id));
+            } catch (e) {
+                console.error('CloudSync.pushSolvesBulk failed:', e);
+                // A batch is all-or-nothing, so ONE document the server rejects
+                // would block every other solve in it forever. For "this
+                // document is the problem" errors retry one by one, so only the
+                // bad solve stays queued. (Offline / quota errors are not
+                // retried per document: they would all fail the same way.)
+                const perDocument = ['invalid-argument', 'permission-denied', 'failed-precondition'].includes(e?.code);
+                if (perDocument && solves.length > 1 && solves.length <= 1000 && window.CubeSync?.saveSolve) {
+                    for (const solve of solves) {
+                        try {
+                            await window.CubeSync.saveSolve(sessionId, solve);
+                            PendingSync.removePendingSolve(solve.id);
+                        } catch (inner) {
+                            allOk = false;
+                            console.error('Solve rejected by the server, kept in the queue:', solve.id, inner);
+                        }
+                    }
+                } else {
+                    allOk = false;
+                }
+                if (!allOk) window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'error', code: e?.code || 'solve-write-failed' } }));
+            }
+        }
+        return allOk;
+    },
+
     async pushSolveUpdate(solveId, patch) {
         const sessionId = findSessionIdForSolve(solveId);
         if (sessionId) PendingSync.addPendingSolve(sessionId, solveId);
@@ -300,6 +435,12 @@ const CloudSync = {
             PendingSync.removePendingSolve(solveId);
             return true;
         } catch (e) {
+            // The document does not exist yet (its creation is still queued):
+            // send the whole solve instead of a patch.
+            if (e?.code === 'not-found' && sessionId) {
+                const solve = (window.timer?.sessions?.[sessionId]?.solves || []).find(s => s.id === solveId);
+                if (solve) return CloudSync.pushNewSolve(sessionId, solve);
+            }
             console.error('CloudSync.pushSolveUpdate failed:', e);
             window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'error', code: e?.code || 'solve-update-failed' } }));
             return false;
@@ -324,13 +465,16 @@ const CloudSync = {
     }
 };
 
-// Retries anything queued in PendingSync -- called once at the very
-// start of runSync(), before deciding full vs. delta pull. Bounded by
-// how many pushes actually failed (normally zero), not by history size.
+// Retries anything queued in PendingSync. One failing item no longer aborts
+// the whole sync (a single permanently-rejected write used to block every
+// later sync forever): everything else still goes through, and the number of
+// failures is returned so the caller can report an error at the end.
 async function flushPendingSync() {
     const timer = window.timer;
-    if (!timer) return;
+    if (!timer) return 0;
+    let failures = 0;
 
+    const toPush = [];
     for (const { sessionId, id } of PendingSync.getPendingSolves()) {
         const solve = (timer.sessions[sessionId]?.solves || []).find(s => s.id === id);
         if (!solve) {
@@ -338,24 +482,119 @@ async function flushPendingSync() {
             PendingSync.removePendingSolve(id);
             continue;
         }
-        if (!(await CloudSync.pushNewSolve(sessionId, solve))) throw Object.assign(new Error('Pending solve write failed'), { code: 'solve-write-failed' });
+        toPush.push({ sessionId, solve });
+    }
+    if (toPush.length > 1) {
+        if (!(await CloudSync.pushSolvesBulk(toPush))) failures++;
+    } else if (toPush.length === 1) {
+        if (!(await CloudSync.pushNewSolve(toPush[0].sessionId, toPush[0].solve))) failures++;
     }
 
     for (const id of PendingSync.getPendingDeletes()) {
-        if (!(await CloudSync.pushSolveDelete(id))) throw Object.assign(new Error('Pending delete failed'), { code: 'solve-delete-failed' });
+        if (!(await CloudSync.pushSolveDelete(id))) failures++;
+    }
+    return failures;
+}
+
+// ---- Safety snapshot (local only) --------------------------------------
+// A copy of the whole sessions map, kept in localStorage in case the main
+// cache gets wiped or corrupted. It doubles the storage used, so it is
+// refreshed rarely, and it must never block synchronization.
+const SAFETY_BACKUP_KEY = 'cubeTimerSessionsSafetyBackup';
+const SAFETY_BACKUP_INFO_KEY = 'cubeTimerSessionsSafetyBackupInfo';
+
+// Brings back solves that exist in the snapshot but not in the live session
+// map. Unlike the old "replace everything with the larger snapshot", this is a
+// union that skips everything the user deleted on purpose (tombstones, deleted
+// sessions, reset sessions) -- so deleting a solve no longer gets undone.
+function restoreFromSafetyBackup(timer, user) {
+    const saved = AppStorage.getJSON(SAFETY_BACKUP_KEY, null);
+    const info = AppStorage.getJSON(SAFETY_BACKUP_INFO_KEY, {}) || {};
+    if (!saved || typeof saved !== 'object') return 0;
+    if (info.uid && info.uid !== user.uid) return 0; // never leak another account's history
+    if (countSolves(saved) <= countSolves(timer.sessions)) return 0;
+
+    const deletedSolves = SyncTombstones.getDeletedSolveIds();
+    const deletedSessions = SyncTombstones.getDeletedSessionIds();
+    const restored = [];
+
+    for (const [sid, backupSession] of Object.entries(saved)) {
+        if (!backupSession || deletedSessions.has(sid)) continue;
+        let session = timer.sessions[sid];
+        if (!session) {
+            const { solves, ...meta } = backupSession; // eslint-disable-line no-unused-vars
+            session = { ...meta, id: sid, solves: [] };
+            timer.sessions[sid] = session;
+        }
+        const resetAt = Math.max(Number(session.resetAt) || 0, Number(backupSession.resetAt) || 0);
+        const have = new Set((session.solves || []).map(s => s.id));
+        const missing = SyncMerge.applyResetCutoff(
+            (backupSession.solves || []).filter(s => s && s.id && !have.has(s.id) && !deletedSolves.has(s.id)),
+            resetAt
+        );
+        if (!missing.length) continue;
+        session.solves = SyncMerge.mergeSolves(session.solves || [], missing, deletedSolves);
+        for (const s of missing) restored.push({ sessionId: sid, id: s.id });
+    }
+    if (restored.length) {
+        if (!timer.sessions[timer.currentSessionId]) {
+            timer.currentSessionId = Object.keys(timer.sessions)[0] || 'no-session';
+        }
+        // Not necessarily in the cloud: queue them so they get uploaded.
+        PendingSync.addPendingSolves(restored);
+    }
+    return restored.length;
+}
+
+function writeSafetyBackup(timer, user) {
+    try {
+        const info = AppStorage.getJSON(SAFETY_BACKUP_INFO_KEY, {}) || {};
+        const count = countSolves(timer.sessions);
+        const stale = !info.createdAt || (Date.now() - Number(info.createdAt)) > SAFETY_BACKUP_MIN_INTERVAL_MS;
+        const differs = count !== (Number(info.solveCount) || 0) || (info.uid && info.uid !== user.uid);
+        if (!stale || !differs) return;
+
+        let ok = AppStorage.setJSON(SAFETY_BACKUP_KEY, timer.sessions);
+        if (!ok) {
+            // Out of localStorage: free the old snapshot and try once more.
+            try { localStorage.removeItem(SAFETY_BACKUP_KEY); } catch (_) { /* ignore */ }
+            ok = AppStorage.setJSON(SAFETY_BACKUP_KEY, timer.sessions);
+        }
+        if (!ok) {
+            try { localStorage.removeItem(SAFETY_BACKUP_INFO_KEY); } catch (_) { /* ignore */ }
+            console.warn('Safety snapshot skipped: not enough local storage.');
+            return;
+        }
+        AppStorage.setJSON(SAFETY_BACKUP_INFO_KEY, { uid: user.uid, createdAt: Date.now(), solveCount: count });
+    } catch (e) {
+        console.warn('Safety snapshot failed:', e);
     }
 }
 
-// ---- Orchestration ------------------------------------------------------
-let _customPhrasesUnsubscribe = null;
+// ---- Live listener on users/{uid} --------------------------------------
+// One listener serves three purposes: (1) the metadata read that every sync
+// needs (so sync itself no longer pays for it), (2) live updates of custom
+// phrases and progression coming from another device, (3) nothing else.
+let _metaListener = null; // { uid, unsubscribe, firstSnapshot }
+let _liveMeta = { ready: false, data: null, uid: null };
 
+// ---- Orchestration ------------------------------------------------------
 const AppSync = {
     _requestedSync: null,
     _syncRequestedWhileRunning: false,
+    lastSyncFinishedAt: 0,
+    _retryTimer: null,
+    _retryAttempt: 0,
+    _lastMetaHash: null,
+    _remoteMetaHash: null,
+    _metaInFlight: null,
+    _lastProgressionHash: null,
+    _progressionTimer: null,
+
     requestSync() {
         if (this._requestedSync) {
-            // A solve may be created while a pull/merge is already running.
-            // Do not lose that request behind the deduplication guard.
+            // Remember that someone asked while a sync was running; a re-run
+            // happens only if there is unsent work left (see finally below).
             this._syncRequestedWhileRunning = true;
             return this._requestedSync;
         }
@@ -363,106 +602,69 @@ const AppSync = {
         window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'syncing' } }));
         this._requestedSync = Promise.resolve()
             .then(() => this.runSync())
-            .then(() => window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'synced', at: Date.now() } })))
+            .then(ran => {
+                if (ran) {
+                    this.lastSyncFinishedAt = Date.now();
+                    this._retryAttempt = 0;
+                    clearTimeout(this._retryTimer);
+                }
+                window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'synced', at: Date.now() } }));
+            })
             .catch(error => {
                 console.error('Automatic sync failed:', error);
                 window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'error', code: error?.code || 'unknown' } }));
+                this._scheduleRetry();
             })
             .finally(() => {
                 this._requestedSync = null;
                 if (this._syncRequestedWhileRunning) {
                     this._syncRequestedWhileRunning = false;
-                    queueMicrotask(() => this.requestSync());
+                    // A solve created during the run is queued in PendingSync
+                    // before its request starts, so "pending is empty" really
+                    // means nothing is left to do. (Previously EVERY overlapping
+                    // request -- login button + auth event + timer-ready --
+                    // caused a second complete sync.)
+                    if (PendingSync.hasPending()) queueMicrotask(() => this.requestSync());
                 }
             });
         return this._requestedSync;
     },
+
+    // After a failed sync: one retry with exponential backoff (30 s .. 15 min),
+    // instead of the old fixed 15-second polling loop.
+    _scheduleRetry() {
+        clearTimeout(this._retryTimer);
+        const delay = Math.min(15 * 60 * 1000, 30000 * Math.pow(2, this._retryAttempt++));
+        this._retryTimer = setTimeout(() => requestSyncWhenReady({ force: true }), delay);
+    },
+
     // Call this right after a successful login, and once on page load if
-    // a session was restored. The FULL solve history is only ever read
-    // here once per account+device (when there's no local "lastSyncedAt"
-    // marker yet) -- every sync after that pulls only what changed since
-    // the marker (see pullSolvesDelta), so read cost stops scaling with
-    // how much history a user has piled up and instead tracks how much
-    // actually changed since they were last here. Every solve add/edit/
-    // delete still uses the point-write functions below, same as before.
+    // a session was restored. Returns true when a real sync ran.
     async runSync() {
         const timer = window.timer;
-        if (!timer) return;
+        if (!timer) return false;
 
         const user = window.CubeAuth?.getCurrentUser?.();
-        if (!user) return;
+        if (!user) return false;
 
-        // A recoverable local snapshot is written before any cloud merge or
-        // account switch can replace the in-memory session map.
-        const safetyBackup = JSON.parse(JSON.stringify(timer.sessions || {}));
-        const safetySolveCount = Object.values(safetyBackup).reduce((sum, session) => sum + (Array.isArray(session?.solves) ? session.solves.length : 0), 0);
-        const previousBackupInfo = AppStorage.getJSON('cubeTimerSessionsSafetyBackupInfo', {}) || {};
-
-        // If a previous run left a larger snapshot than the currently loaded
-        // local cache, recover it before doing any cloud merge. This protects
-        // against a browser/app cache being reset or a failed update leaving
-        // an incomplete session map. Only use a snapshot belonging to this
-        // account; never leak another account's local history.
-        const localSolveCount = safetySolveCount;
-        const savedSafety = AppStorage.getJSON('cubeTimerSessionsSafetyBackup', null);
-        const savedSafetyInfo = AppStorage.getJSON('cubeTimerSessionsSafetyBackupInfo', {}) || {};
-        const savedSafetyCount = Object.values(savedSafety || {}).reduce((sum, session) => sum + (Array.isArray(session?.solves) ? session.solves.length : 0), 0);
-        const safetyBelongsToUser = !savedSafetyInfo.uid || savedSafetyInfo.uid === user.uid;
-        if (savedSafety && safetyBelongsToUser && savedSafetyCount > localSolveCount) {
-            timer.sessions = JSON.parse(JSON.stringify(savedSafety));
-            if (!timer.sessions[timer.currentSessionId]) {
-                timer.currentSessionId = Object.keys(timer.sessions)[0] || 'no-session';
-            }
-        }
-        if (safetySolveCount >= Number(previousBackupInfo.solveCount || 0)) {
-            if (!AppStorage.setJSON('cubeTimerSessionsSafetyBackup', safetyBackup)) {
-                throw Object.assign(new Error('Could not create local safety backup'), { code: 'backup-failed' });
-            }
-            AppStorage.setJSON('cubeTimerSessionsSafetyBackupInfo', {
-                uid: user.uid,
-                createdAt: Date.now(),
-                solveCount: safetySolveCount
-            });
-        }
-
-        // v3 uses Firestore server timestamps. Client clocks can differ by
-        // hours without making synchronization one-directional.
-        // v6 forces one full union/backfill on every device. Besides installing
-        // the durable outbox above, this recovers solves that are still present
-        // locally but were stranded before the outbox fix reached the device.
-        const syncProtocolVersion = '7';
-        if (AppStorage.getRaw('syncProtocolVersion') !== syncProtocolVersion) {
-            AppStorage.setRaw('lastSyncedAt', '');
-            AppStorage.setRaw('cloudSyncCursorV3', '');
-            AppStorage.setRaw('cloudSyncInitializedV3', '');
-        }
-
+        // ---- Account switch: local caches belong to a different identity ----
         // Local tombstones and the local sessions cache live in this browser's
-        // localStorage, which is NOT scoped to a Firebase account -- it's just
-        // "whatever this device last had". If the signed-in uid is different
-        // from the one this device last synced (new account, switched
-        // account, account was deleted and recreated, etc.), that local cache
-        // -- deletion markers especially -- belongs to a DIFFERENT identity
-        // and must not be trusted. Left alone, a stale "session X was
-        // deleted" tombstone from a previous account would get unioned into
-        // the new account's cloud tombstone list and then propagate to every
-        // other device, which would honor it and hide their own real,
-        // never-deleted sessions. This is what caused sessions to vanish
-        // across every device after switching accounts.
+        // localStorage, which is NOT scoped to a Firebase account. If the
+        // signed-in uid differs from the one this device last synced, a stale
+        // "session X was deleted" tombstone from the previous account must not
+        // be unioned into the new account's cloud list (that is what once made
+        // sessions vanish on every device).
         const lastSyncedUid = AppStorage.getRaw('lastSyncedUid');
         if (lastSyncedUid && lastSyncedUid !== user.uid) {
             AppStorage.setJSON('deletedSolveIds', []);
             AppStorage.setJSON('deletedSessionIds', []);
             PendingSync.clearAll();
-            // A different account has never had a delta baseline on this
-            // device -- force the full-read path below instead of trying
-            // to diff against the previous account's marker.
             AppStorage.setRaw('lastSyncedAt', '');
             AppStorage.setRaw('cloudSyncCursorV3', '');
             AppStorage.setRaw('cloudSyncInitializedV3', '');
-            // Preserve the visible local history. It is protected by the
-            // safety snapshot above and will be union-merged with the newly
-            // signed-in account instead of being erased on an auth transition.
+            this._lastMetaHash = null;
+            this._remoteMetaHash = null;
+            this._lastProgressionHash = null;
             if (window.commentary?.setCustomPhrases) {
                 window.commentary.setCustomPhrases({}, 0);
             } else {
@@ -473,11 +675,19 @@ const AppSync = {
         }
         AppStorage.setRaw('lastSyncedUid', user.uid);
 
-        // Retry anything that failed to push last time, before pulling --
-        // this is what stands in for the old "scan the full remote list to
-        // find what's missing" backfill now that a normal sync no longer
-        // reads the full remote list.
-        await flushPendingSync();
+        // Protocol version. Bumping it forces ONE full re-read on every device
+        // (cost = history size per device), so it stays at 7: nothing in the
+        // cursor/merge semantics changed in a way that needs it.
+        const syncProtocolVersion = '7';
+        if (AppStorage.getRaw('syncProtocolVersion') !== syncProtocolVersion) {
+            AppStorage.setRaw('lastSyncedAt', '');
+            AppStorage.setRaw('cloudSyncCursorV3', '');
+            AppStorage.setRaw('cloudSyncInitializedV3', '');
+        }
+
+        // Recover solves that went missing locally (union, never undoes deletes).
+        const restoredCount = restoreFromSafetyBackup(timer, user);
+        SyncTombstones.pruneOldSolveTombstones();
 
         const cloudCursor = Number(AppStorage.getRaw('cloudSyncCursorV3')) || 0;
         const localCountKey = `syncLocalSolveCount:${user.uid}`;
@@ -486,8 +696,10 @@ const AppSync = {
         // global cursor from an older build. Read the complete cloud history
         // once so an empty/new browser can never skip existing solves.
         const missingAccountBaseline = AppStorage.getRaw(localCountKey, null) === null;
+        // Intentional deletes/resets lower the baseline themselves, so this is
+        // now true only for UNEXPLAINED losses (cache wiped, storage error).
         const localCountDropped = Number.isFinite(previousLocalSolveCount) && previousLocalSolveCount > 0
-            && Object.values(timer.sessions || {}).reduce((sum, session) => sum + (Array.isArray(session?.solves) ? session.solves.length : 0), 0) < previousLocalSolveCount;
+            && countSolves(timer.sessions) < previousLocalSolveCount;
         const isFullSync = AppStorage.getRaw('cloudSyncInitializedV3') !== '1' || missingAccountBaseline || localCountDropped;
         if (localCountDropped) {
             AppStorage.setRaw('lastSyncedAt', '');
@@ -495,14 +707,13 @@ const AppSync = {
         }
 
         const [remoteMeta, remoteHistory] = await Promise.all([
-            CloudSync.pullMeta(),
-            isFullSync ? CloudSync.pullAllSolvesOnce() : CloudSync.pullSolvesDelta(cloudCursor)
+            this.ensureMetaListener().then(() => CloudSync.pullMeta()),
+            isFullSync ? CloudSync.pullAllSolvesOnce() : CloudSync.pullSolvesDelta(isFullSync ? 0 : cloudCursor)
         ]);
 
         // Custom commentary phrases are small account metadata. Use a
         // last-write-wins timestamp so additions and deletions made on one
         // device are reflected on every other signed-in device.
-        const localCustomPhrases = AppStorage.getJSON('customPhrases', {});
         const localCustomPhrasesUpdatedAt = Number(AppStorage.getRaw('customPhrasesUpdatedAt', '0')) || 0;
         const remoteCustomPhrasesUpdatedAt = Number(remoteMeta?.customPhrasesUpdatedAt) || 0;
         let shouldPushCustomPhrases = localCustomPhrasesUpdatedAt > remoteCustomPhrasesUpdatedAt;
@@ -519,12 +730,10 @@ const AppSync = {
         if (remoteMeta?.progressionState) window.progression?.mergeCloudState?.(remoteMeta.progressionState);
 
         // Fold in tombstones from Firestore FIRST -- otherwise a solve/session
-        // deleted on another device looks, from this device's point of view,
-        // just like a solve/session it never heard was deleted, and the
-        // union-merge below would resurrect it. mergeRemote*Tombstones unions
-        // into the already-cumulative local list, so passing only the DELTA
-        // tombstones here (in the non-full-sync case) is correct -- previously
-        // known tombstones are already folded in from earlier syncs.
+        // deleted on another device looks like one this device never heard was
+        // deleted, and the union-merge below would resurrect it. The merge
+        // unions into the already-cumulative local list, so passing only the
+        // DELTA tombstones is correct.
         if (remoteMeta) {
             SyncTombstones.mergeRemoteSessionTombstones(remoteMeta.deletedSessionIds);
         }
@@ -532,20 +741,14 @@ const AppSync = {
 
         const deletedSessionIds = SyncTombstones.getDeletedSessionIds();
         const deletedSolveIds = SyncTombstones.getDeletedSolveIds();
+        const pendingIds = PendingSync.getPendingSolveIdSet();
 
-        // Merge session metadata (names/disciplines), solves temporarily empty.
+        // Merge session metadata (names/disciplines/resetAt), solves merged below.
         const mergedSessions = remoteMeta
             ? SyncMerge.mergeSessionsMeta(timer.sessions, remoteMeta.sessions, deletedSessionIds)
             : { ...timer.sessions };
 
-        // Group the flat remote solve list by sessionId, then merge each
-        // session's local solves against its remote solves. In delta mode
-        // this remote list is just what changed -- mergeSolves still does
-        // the right thing against local's full cached state (already
-        // persisted from the previous sync via timer.saveSessions()):
-        // anything not touched by this delta simply passes through
-        // untouched, anything new/edited gets folded in, anything now
-        // tombstoned gets dropped.
+        // Group the flat remote solve list by sessionId.
         const remoteSolvesBySession = {};
         for (const solve of remoteHistory.solves) {
             const sid = solve.sessionId || 'no-session';
@@ -569,38 +772,35 @@ const AppSync = {
             }
         }
 
-        // Solves that exist locally (or only in the legacy embedded field)
-        // but never made it to the new subcollection. Only meaningful to
-        // compute during a FULL sync -- remoteSolves only holds the whole
-        // remote set in that case, so "not found in remoteSolves" actually
-        // means "missing from Firestore". During a delta sync, remoteSolves
-        // is deliberately just the recent changes, so the same check would
-        // wrongly flag most of the untouched local history as missing and
-        // re-push it. Anything that genuinely fails to push is instead
-        // caught by PendingSync/flushPendingSync above.
+        // Solves that exist locally (or only in the legacy embedded field) but
+        // never reached the subcollection. Only meaningful in a FULL sync --
+        // there remoteSolves is the whole remote set, so "not found" really
+        // means "missing from Firestore". Anything that fails to push later is
+        // caught by PendingSync.
         const localSolvesNotYetRemote = [];
         for (const sessionId of Object.keys(mergedSessions)) {
             if (deletedSessionIds.has(sessionId)) continue;
             const localSolves = timer.sessions[sessionId]?.solves || [];
             const remoteSolves = remoteSolvesBySession[sessionId] || [];
 
-            let solvesWithLegacy = localSolves;
+            let base = localSolves;
             if (isFullSync) {
                 // Backward-compat: sessions created before the subcollection
-                // rewrite may still have their solves sitting in the OLD
-                // embedded field (remote.sessions[id].solves from the
-                // metadata doc). Treat that as a third merge source instead
-                // of silently discarding it.
+                // rewrite may still have their solves in the OLD embedded field.
                 const legacySolves = (remoteMeta?.sessions?.[sessionId]?.solves) || [];
-                solvesWithLegacy = SyncMerge.mergeSolves(localSolves, legacySolves, deletedSolveIds);
+                base = SyncMerge.mergeSolves(localSolves, legacySolves, deletedSolveIds);
             }
-            mergedSessions[sessionId].solves = SyncMerge.mergeSolves(solvesWithLegacy, remoteSolves, deletedSolveIds);
+            const merged = SyncMerge.applyResetCutoff(
+                SyncMerge.mergeSolves(base, remoteSolves, deletedSolveIds, pendingIds),
+                mergedSessions[sessionId].resetAt
+            );
+            mergedSessions[sessionId].solves = merged;
             mergedSessions[sessionId].id = sessionId;
             mergedSessions[sessionId].subsessions = Array.isArray(mergedSessions[sessionId].subsessions) ? mergedSessions[sessionId].subsessions : [];
 
             if (isFullSync) {
                 const remoteIds = new Set(remoteSolves.map(s => s.id));
-                for (const solve of mergedSessions[sessionId].solves) {
+                for (const solve of merged) {
                     if (!remoteIds.has(solve.id) && !deletedSolveIds.has(solve.id)) {
                         localSolvesNotYetRemote.push({ sessionId, solve });
                     }
@@ -616,38 +816,59 @@ const AppSync = {
         if (!mergedSessions[timer.currentSessionId] && remoteMeta?.currentSessionId) {
             timer.currentSessionId = remoteMeta.currentSessionId;
         }
+        if (!timer.sessions[timer.currentSessionId]) {
+            timer.currentSessionId = Object.keys(timer.sessions)[0] || 'no-session';
+        }
         timer.saveSessions();
         timer.renderSessionsList?.();
         timer.updateSessionDetails?.();
         timer.updateUI();
 
         // Keep the header's "logged in as ..." nickname fresh after a
-        // restored session (login/register/Google-login already set this
-        // themselves right after auth, so this mainly covers page reloads).
+        // restored session.
         if (remoteMeta?.nickname) {
             AppStorage.setJSON('authUser', { uid: user.uid, nickname: remoteMeta.nickname, email: user.email });
         }
 
         // Everything above succeeded -- safe to advance the delta baseline.
-        const newestSolveCursor = Math.max(0, ...remoteHistory.solves.map(s => Number(s.cloudUpdatedAt) || 0));
-        const newestDeleteCursor = Math.max(0, ...remoteHistory.tombstones.map(t => Number(t.cloudDeletedAt) || 0));
-        AppStorage.setRaw('cloudSyncCursorV3', String(Math.max(cloudCursor, newestSolveCursor, newestDeleteCursor)));
+        // (A loop, not Math.max(...array): spreading a six-figure array
+        // overflows the call stack.)
+        let newestCursor = cloudCursor;
+        for (const s of remoteHistory.solves) newestCursor = Math.max(newestCursor, Number(s.cloudUpdatedAt) || 0);
+        for (const t of remoteHistory.tombstones) newestCursor = Math.max(newestCursor, Number(t.cloudDeletedAt) || 0);
+        AppStorage.setRaw('cloudSyncCursorV3', String(newestCursor));
         AppStorage.setRaw('cloudSyncInitializedV3', '1');
         AppStorage.setRaw('syncProtocolVersion', syncProtocolVersion);
-        AppStorage.setRaw(localCountKey, String(Object.values(timer.sessions || {}).reduce((sum, session) => sum + (Array.isArray(session?.solves) ? session.solves.length : 0), 0)));
+        AppStorage.setRaw(localCountKey, String(countSolves(timer.sessions)));
 
-        // Push metadata once if it changed, and (full sync only) backfill
-        // any solves that were created locally but never reached Firestore
-        // at all (e.g. made while offline before the very first sign-in on
-        // this device). Each solve is still exactly one write either way.
-        if (!(await AppSync.pushSessionsMetaNow())) throw Object.assign(new Error('Session metadata write failed'), { code: 'metadata-write-failed' });
-        for (const { sessionId, solve } of localSolvesNotYetRemote) {
-            if (!(await CloudSync.pushNewSolve(sessionId, solve))) throw Object.assign(new Error('Solve backfill failed'), { code: 'solve-write-failed' });
+        // ---- Push phase: only what is actually different ----
+        let deferredError = null;
+        const fail = (message, code) => { if (!deferredError) deferredError = Object.assign(new Error(message), { code }); };
+
+        // Remember what the cloud has, so identical content is not rewritten.
+        this._seedRemoteMetaHash(remoteMeta, deletedSessionIds);
+        if (!(await this.pushSessionsMetaNow())) fail('Session metadata write failed', 'metadata-write-failed');
+
+        // Solves queued earlier (offline, failed) + solves that never reached
+        // the cloud. Full sync only for the second kind; both use batched writes.
+        if (localSolvesNotYetRemote.length) {
+            PendingSync.addPendingSolves(localSolvesNotYetRemote.map(e => ({ sessionId: e.sessionId, id: e.solve.id })));
         }
-        if (shouldPushCustomPhrases && !(await AppSync.pushCustomPhrasesNow())) throw Object.assign(new Error('Custom phrases write failed'), { code: 'phrases-write-failed' });
+        if ((await flushPendingSync()) > 0) fail('Pending solve writes failed', 'solve-write-failed');
+
+        if (shouldPushCustomPhrases && !(await this.pushCustomPhrasesNow())) fail('Custom phrases write failed', 'phrases-write-failed');
         window.progression?.ensureDaily?.();
-        if (window.progression && !(await AppSync.pushProgressionNow())) throw Object.assign(new Error('Progression write failed'), { code: 'progression-write-failed' });
-        AppSync.startCustomPhrasesLiveSync();
+        if (window.progression) {
+            const remoteProgressionHash = remoteMeta?.progressionState ? stableStringify(remoteMeta.progressionState) : null;
+            if (!(await this.pushProgressionNow(remoteProgressionHash))) fail('Progression write failed', 'progression-write-failed');
+        }
+
+        writeSafetyBackup(timer, user);
+        void restoredCount;
+        this.startCustomPhrasesLiveSync();
+
+        if (deferredError) throw deferredError;
+        return true;
     },
 
     // ---- Point-write helpers, called directly from Timer on each action ----
@@ -664,6 +885,21 @@ const AppSync = {
         window.dispatchEvent(new CustomEvent('timerdatachange', { detail: { type: 'delete', solveId } }));
     },
 
+    // "Reset session": clears the solves but keeps the session. Costs ONE
+    // metadata write (the `resetAt` marker travels with the session metadata
+    // that saveSessions() pushes), not one delete per solve. Call this INSTEAD
+    // of `session.solves = []`; the caller still calls saveSessions().
+    resetSessionSolves(session) {
+        if (!session) return 0;
+        const removed = Array.isArray(session.solves) ? session.solves.length : 0;
+        session.solves = [];
+        session.resetAt = Date.now();
+        PendingSync.removePendingForSession(session.id);
+        adjustLocalCountBaseline(-removed);
+        window.dispatchEvent(new CustomEvent('timerdatachange', { detail: { type: 'reset', sessionId: session.id } }));
+        return removed;
+    },
+
     async pushCustomPhrasesNow() {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
         const customPhrases = AppStorage.getJSON('customPhrases', {});
@@ -671,19 +907,39 @@ const AppSync = {
         return CloudSync.pushMeta({ customPhrases, customPhrasesUpdatedAt });
     },
 
-    async pushProgressionNow() {
+    // Progression is written only when its content differs from what was last
+    // written / what the cloud already holds.
+    async pushProgressionNow(knownRemoteHash = null) {
         if (!window.CubeAuth || !window.CubeAuth.getCurrentUser() || !window.progression) return false;
-        return CloudSync.pushMeta({ progressionState: window.progression.exportState() });
+        clearTimeout(this._progressionTimer);
+        this._progressionTimer = null;
+        const state = window.progression.exportState();
+        const hash = stableStringify(state);
+        if (hash === this._lastProgressionHash || hash === knownRemoteHash) {
+            this._lastProgressionHash = hash;
+            return true;
+        }
+        const ok = await CloudSync.pushMeta({ progressionState: state });
+        if (ok) this._lastProgressionHash = hash;
+        return ok;
+    },
+    // Debounced variant used by the progression system on every change
+    // (coins, achievements, ...): several changes in a row -> one write.
+    queueProgressionPush(delay = PROGRESSION_PUSH_DEBOUNCE_MS) {
+        if (!window.CubeAuth?.getCurrentUser?.()) return;
+        clearTimeout(this._progressionTimer);
+        this._progressionTimer = setTimeout(() => this.pushProgressionNow(), delay);
     },
 
     async pushImportedSessions(sessionGroups) {
-        const queueAll = () => (sessionGroups || []).forEach(group => (group.solves || []).forEach(solve => PendingSync.addPendingSolve(group.sessionId, solve.id)));
-        if (!window.CubeAuth?.getCurrentUser?.()) {
-            queueAll();
-            return false;
-        }
+        const entries = [];
+        (sessionGroups || []).forEach(group => (group.solves || []).forEach(solve => {
+            if (solve?.id) entries.push({ sessionId: group.sessionId, id: solve.id });
+        }));
+        // Queue first: if the tab is closed mid-upload, the next sync retries.
+        PendingSync.addPendingSolves(entries);
+        if (!window.CubeAuth?.getCurrentUser?.()) return false;
         if (!window.CubeSync?.saveSolvesBatch) {
-            queueAll();
             window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'error', code: 'batch-api-unavailable' } }));
             return false;
         }
@@ -691,105 +947,206 @@ const AppSync = {
         try {
             for (const group of (sessionGroups || [])) {
                 await window.CubeSync.saveSolvesBatch(group.sessionId, group.solves || []);
+                PendingSync.removePendingSolves((group.solves || []).map(s => s?.id));
             }
             await this.pushSessionsMetaNow();
-            AppStorage.setRaw('cloudSyncInitializedV3', '');
-            await this.requestSync();
+            // No full re-read and no "verify everything" pass any more: the
+            // batch commit is atomic, and the next delta sync picks the
+            // imported documents up by cursor.
+            window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'synced', at: Date.now() } }));
             return true;
         } catch (error) {
             console.error('Imported solve upload failed:', error);
-            queueAll();
             window.dispatchEvent(new CustomEvent('sync-status', { detail: { state: 'error', code: error?.code || 'import-upload-failed' } }));
             return false;
         }
     },
 
-    startCustomPhrasesLiveSync() {
-        if (_customPhrasesUnsubscribe || !window.CubeAuth?.getCurrentUser?.() || !window.CubeSync?.subscribeUserData) return;
+    // Starts (once per account) the listener on users/{uid} and resolves after
+    // its first snapshot, which doubles as the metadata read of a sync.
+    ensureMetaListener() {
+        const user = window.CubeAuth?.getCurrentUser?.();
+        if (!user || !window.CubeSync?.subscribeUserData) return Promise.resolve(false);
+        if (_metaListener && _metaListener.uid === user.uid) return _metaListener.firstSnapshot;
+        this.stopCustomPhrasesLiveSync();
+
+        const uid = user.uid;
+        let first = true;
+        let resolveFirst;
+        const firstSnapshot = new Promise(resolve => { resolveFirst = resolve; });
+        _liveMeta = { ready: false, data: null, uid };
         try {
-            _customPhrasesUnsubscribe = window.CubeSync.subscribeUserData((remote) => {
-                if (remote?.progressionState) window.progression?.mergeCloudState?.(remote.progressionState);
-                const remoteUpdatedAt = Number(remote?.customPhrasesUpdatedAt) || 0;
-                const localUpdatedAt = Number(AppStorage.getRaw('customPhrasesUpdatedAt', '0')) || 0;
-                if (!remote?.customPhrases || remoteUpdatedAt <= localUpdatedAt) return;
-                if (window.commentary?.setCustomPhrases) {
-                    window.commentary.setCustomPhrases(remote.customPhrases, remoteUpdatedAt);
-                } else {
-                    AppStorage.setJSON('customPhrases', remote.customPhrases);
-                    AppStorage.setRaw('customPhrasesUpdatedAt', String(remoteUpdatedAt));
-                    window.dispatchEvent(new CustomEvent('customphraseschange'));
+            const unsubscribe = window.CubeSync.subscribeUserData((remote, info) => {
+                if (_liveMeta.uid !== uid) return;
+                _liveMeta.data = remote;
+                _liveMeta.ready = true;
+                if (first) {
+                    first = false;
+                    resolveFirst(true);
+                    return; // runSync merges this very snapshot itself
                 }
+                this._applyLiveSnapshot(remote, info);
+            }, (error) => {
+                console.error('Metadata live listener failed:', error);
+                if (_metaListener?.uid === uid) { _metaListener = null; _liveMeta = { ready: false, data: null, uid: null }; }
+                resolveFirst(false); // sync falls back to a one-off getDoc
             });
+            _metaListener = { uid, unsubscribe, firstSnapshot };
         } catch (e) {
-            console.error('Custom phrases live sync failed:', e);
+            console.error('Could not start metadata live listener:', e);
+            return Promise.resolve(false);
+        }
+        return firstSnapshot;
+    },
+
+    // A change made on another device (progression, custom phrases).
+    _applyLiveSnapshot(remote, info) {
+        if (info?.pending) return; // echo of our own unsent write
+        if (remote?.progressionState) {
+            const hash = stableStringify(remote.progressionState);
+            if (hash !== this._lastProgressionHash) {
+                window.progression?.mergeCloudState?.(JSON.parse(JSON.stringify(remote.progressionState)));
+            }
+        }
+        const remoteUpdatedAt = Number(remote?.customPhrasesUpdatedAt) || 0;
+        const localUpdatedAt = Number(AppStorage.getRaw('customPhrasesUpdatedAt', '0')) || 0;
+        if (!remote?.customPhrases || remoteUpdatedAt <= localUpdatedAt) return;
+        if (window.commentary?.setCustomPhrases) {
+            window.commentary.setCustomPhrases(remote.customPhrases, remoteUpdatedAt);
+        } else {
+            AppStorage.setJSON('customPhrases', remote.customPhrases);
+            AppStorage.setRaw('customPhrasesUpdatedAt', String(remoteUpdatedAt));
+            window.dispatchEvent(new CustomEvent('customphraseschange'));
         }
     },
 
+    // Kept under the old names: firebase-init.js calls stopCustomPhrasesLiveSync
+    // on sign-out and runSync() calls startCustomPhrasesLiveSync().
+    startCustomPhrasesLiveSync() {
+        this.ensureMetaListener();
+    },
     stopCustomPhrasesLiveSync() {
-        if (_customPhrasesUnsubscribe) _customPhrasesUnsubscribe();
-        _customPhrasesUnsubscribe = null;
+        if (_metaListener) { try { _metaListener.unsubscribe(); } catch (_) { /* ignore */ } }
+        _metaListener = null;
+        _liveMeta = { ready: false, data: null, uid: null };
+        this._lastMetaHash = null;
+        this._remoteMetaHash = null;
+        this._lastProgressionHash = null;
     },
 
-    // Metadata (session names/disciplines/current session) is small and
-    // changes rarely, so it's fine to push it as a whole -- debounced the
-    // same way the old blob push was, just without the solve history
-    // riding along with it.
-    pushSessionsMetaNow() {
-        if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
+    // ---- Session metadata (names/disciplines/current session/tombstones) ----
+    _buildMetaPayload() {
         const timer = window.timer;
-        if (!timer) return false;
         const sessionsMeta = {};
         for (const [id, session] of Object.entries(timer.sessions)) {
             const { solves, ...meta } = session; // eslint-disable-line no-unused-vars
             sessionsMeta[id] = meta;
         }
-        return CloudSync.pushMeta({
+        return {
             sessions: sessionsMeta,
             currentSessionId: timer.currentSessionId,
-            deletedSessionIds: SyncTombstones.getDeletedSessionEntries()
+            // sorted, so the same set always hashes the same
+            deletedSessionIds: [...SyncTombstones.getDeletedSessionEntries()].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        };
+    },
+
+    // Remember what the cloud currently holds for the metadata fields we write.
+    _seedRemoteMetaHash(remoteMeta, deletedSessionIds) {
+        if (!remoteMeta || !remoteMeta.sessions) { this._remoteMetaHash = null; return; }
+        const sessions = {};
+        for (const [id, session] of Object.entries(remoteMeta.sessions)) {
+            if (deletedSessionIds.has(id)) continue; // lingers in the cloud map, we never send it
+            const { solves, ...meta } = session || {}; // eslint-disable-line no-unused-vars
+            sessions[id] = meta;
+        }
+        this._remoteMetaHash = stableStringify({
+            sessions,
+            currentSessionId: remoteMeta.currentSessionId,
+            deletedSessionIds: [...(remoteMeta.deletedSessionIds || [])].sort((a, b) => String(a.id).localeCompare(String(b.id)))
         });
+    },
+
+    // Writes metadata only if its CONTENT changed (same hash as the last write
+    // or as what the cloud already has -> no write). This is what removes the
+    // "3 writes on every sync / on every solve" of the old version.
+    pushSessionsMetaNow() {
+        if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return false;
+        const timer = window.timer;
+        if (!timer) return false;
+        const payload = this._buildMetaPayload();
+        const hash = stableStringify(payload);
+        if (hash === this._lastMetaHash || hash === this._remoteMetaHash) return Promise.resolve(true);
+        if (this._metaInFlight && this._metaInFlight.hash === hash) return this._metaInFlight.promise;
+        const promise = CloudSync.pushMeta(payload).then(ok => {
+            if (ok) { this._lastMetaHash = hash; this._remoteMetaHash = null; }
+            return ok;
+        }).finally(() => { if (this._metaInFlight?.promise === promise) this._metaInFlight = null; });
+        this._metaInFlight = { hash, promise };
+        return promise;
     }
 };
 
 // ---- Live autosync of METADATA ONLY: push after session-level changes --
-// Called from Timer.saveSessions() -- session create/rename/delete,
-// discipline change, session switch, etc. Debounced so several rapid
-// changes collapse into a single small write. Deliberately excludes the
-// solves array now (that's not what changed here in the common case,
-// and per-solve actions push themselves individually via the functions
-// above) -- this is the whole point of the rewrite: no more re-uploading
-// the entire solve history on every save.
+// Called from Timer.saveSessions() -- which also runs after every solve.
+// Debounced hard and content-hashed: a plain solve changes nothing in the
+// metadata, so nothing is written for it.
 let _metaPushTimer = null;
 function queueAutoPush() {
     if (!window.CubeAuth || !window.CubeAuth.getCurrentUser()) return;
     clearTimeout(_metaPushTimer);
     _metaPushTimer = setTimeout(() => {
+        _metaPushTimer = null;
         AppSync.pushSessionsMetaNow();
-    }, 800);
+    }, META_PUSH_DEBOUNCE_MS);
 }
 window.queueAutoPush = queueAutoPush;
+
+// Send debounced writes right away when the tab is hidden / closed.
+function flushDebouncedPushes() {
+    if (_metaPushTimer) {
+        clearTimeout(_metaPushTimer);
+        _metaPushTimer = null;
+        AppSync.pushSessionsMetaNow();
+    }
+    if (AppSync._progressionTimer) AppSync.pushProgressionNow();
+}
 
 window.SyncTombstones = SyncTombstones;
 window.SyncMerge = SyncMerge;
 window.CloudSync = CloudSync;
 window.AppSync = AppSync;
+window.PendingSync = PendingSync;
 
+// ---- When does a sync start? --------------------------------------------
 // Firebase, AppSync and CubeTimer are loaded by separate scripts. Whichever
-// becomes ready last triggers one deduplicated synchronization pass.
-const requestSyncWhenReady = () => {
+// becomes ready last starts the first sync (forced). Later triggers are
+// throttled: coming back to the tab, going online, or an idle tab that stays
+// visible. There is deliberately NO fixed-interval polling any more -- the
+// old setInterval(..., 15000) re-ran a full sync (3+ reads, 3 writes) every
+// 15 seconds in every open tab, 24/7.
+function requestSyncWhenReady(options = {}) {
     if (!window.timer || !window.CubeAuth?.getCurrentUser?.()) return;
+    const force = options.force === true;
+    if (!force && !PendingSync.hasPending() && Date.now() - AppSync.lastSyncFinishedAt < SYNC_MIN_INTERVAL_MS) return;
     AppSync.requestSync();
-};
-window.addEventListener('firebase-ready', requestSyncWhenReady);
-window.addEventListener('firebase-auth-state', requestSyncWhenReady);
-window.addEventListener('timer-ready', requestSyncWhenReady);
-window.addEventListener('online', requestSyncWhenReady);
-window.addEventListener('focus', requestSyncWhenReady);
+}
+const forceSync = () => requestSyncWhenReady({ force: true });
+const throttledSync = () => requestSyncWhenReady();
+
+window.addEventListener('firebase-ready', forceSync);
+window.addEventListener('firebase-auth-state', forceSync);
+window.addEventListener('timer-ready', forceSync);
+window.addEventListener('online', throttledSync);
+window.addEventListener('focus', throttledSync);
+window.addEventListener('pagehide', flushDebouncedPushes);
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') requestSyncWhenReady();
+    if (document.visibilityState === 'visible') throttledSync();
+    else flushDebouncedPushes();
 });
-setInterval(requestSyncWhenReady, 15000);
-if (document.readyState !== 'loading') queueMicrotask(requestSyncWhenReady);
+// A tab left open and visible (second monitor): re-check now and then. The
+// throttle above turns this into at most one sync per SYNC_MIN_INTERVAL_MS.
+setInterval(() => { if (document.visibilityState === 'visible') throttledSync(); }, 5 * 60 * 1000);
+if (document.readyState !== 'loading') queueMicrotask(forceSync);
 
 // ---- Auth error messages -------------------------------------------------
 // Maps Firebase Auth error codes to a friendly, translated message.

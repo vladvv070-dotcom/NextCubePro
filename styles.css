@@ -577,6 +577,8 @@
 
         .timer-container {
             -webkit-touch-callout: none;
+            touch-action: none;
+            overscroll-behavior: none;
         }
 
         .timer-container {
@@ -643,7 +645,9 @@
             mask-composite: exclude;
             filter: drop-shadow(0 0 5px rgba(60, 205, 247, 0.9));
             pointer-events: none;
-            animation: timer-neon-orbit 4.2s linear infinite;
+            /* Keep the timer frame stable; the moving highlight looked like a
+               scroll/swipe affordance on touch screens. */
+            animation: none;
         }
 
         .timer-container > * {

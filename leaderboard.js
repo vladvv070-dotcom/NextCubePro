@@ -19,7 +19,7 @@
             window.addEventListener('languagechange',()=>{this.translate();this._renderFilters();if(this.visible())this.load();});
             window.addEventListener('firebase-auth-state',()=>this.schedulePublish(1400));
             window.addEventListener('sync-status',e=>{if(e.detail?.state==='synced')this.schedulePublish(900);});
-            window.addEventListener('timerdatachange',()=>this.schedulePublish(1800));
+            window.addEventListener('timerdatachange',()=>this.schedulePublish(90000));
         }
         _bind(){
             this.el('fireMenuLeaderboard')?.addEventListener('click',()=>this.open());
@@ -76,9 +76,10 @@
         _time(seconds){if(!Number.isFinite(seconds))return'—';const m=Math.floor(seconds/60),s=(seconds%60).toFixed(2).padStart(5,'0');return m?`${m}:${s}`:s;}
         _duration(ms){const minutes=Math.round(ms/60000);if(minutes<60)return`${minutes} min`;const hours=Math.floor(minutes/60),rest=minutes%60;return`${hours} h ${rest} min`;}
         schedulePublish(delay=1200){clearTimeout(this.publishTimer);this.publishTimer=setTimeout(()=>this.publish(),delay);}
+        _sigKey(uid){return`leaderboardLastSig:${uid}`;}
         async publish(){
             if(!this.configured()||!window.timer||!window.CubeAuth?.getCurrentUser?.())return false;
-            try{const token=await window.CubeAuth.getIdToken();const payload=this.metrics();const response=await fetch(`${API_URL}/publish`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify(payload)});if(!response.ok)throw new Error(`HTTP ${response.status}`);if(this.visible())this.load();return true;}catch(error){console.error('Leaderboard publish failed',error);return false;}
+            try{const payload=this.metrics();const uid=window.CubeAuth.getCurrentUser().uid;const sig=JSON.stringify(payload);if(AppStorage.getRaw(this._sigKey(uid))===sig)return true;const token=await window.CubeAuth.getIdToken();const response=await fetch(`${API_URL}/publish`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify(payload)});if(!response.ok)throw new Error(`HTTP ${response.status}`);AppStorage.setRaw(this._sigKey(uid),sig);if(this.visible())this.load();return true;}catch(error){console.error('Leaderboard publish failed',error);return false;}
         }
         metrics(){
             const all=[];Object.values(window.timer.sessions||{}).forEach(session=>(session.solves||[]).forEach(s=>all.push({...s,discipline:session.discipline||'3x3',effective:s.dnf?Infinity:Number(s.time||0)+Number(s.penalty||0)})));

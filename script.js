@@ -2696,7 +2696,13 @@
             }
 
             saveSessions() {
-                AppStorage.setJSON('cubeTimerSessions', this.sessions);
+                // The safety snapshot in sync.js doubles the space used. If the main
+                // cache no longer fits, drop the snapshot and retry instead of
+                // silently losing the save.
+                if (!AppStorage.setJSON('cubeTimerSessions', this.sessions)) {
+                    try { localStorage.removeItem('cubeTimerSessionsSafetyBackup'); localStorage.removeItem('cubeTimerSessionsSafetyBackupInfo'); } catch (_) {}
+                    if (!AppStorage.setJSON('cubeTimerSessions', this.sessions)) console.error('Could not save sessions: localStorage is full');
+                }
                 AppStorage.setRaw('cubeTimerCurrentSession', this.currentSessionId);
                 // Pushes only session metadata (names/disciplines/current session) —
                 // the solve history itself is synced separately, one solve at a time,
@@ -6087,7 +6093,8 @@
                 const session = this.sessions[this.currentSessionId];
                 if (!confirm(`Reset "${session.name}"? This will delete all ${session.solves.length} solves.`)) return;
 
-                session.solves = [];
+                // Cloud-friendly reset: one metadata write instead of one delete per solve.
+                if (window.AppSync?.resetSessionSolves) window.AppSync.resetSessionSolves(session); else session.solves = [];
                 this.saveSessions();
                 this.renderSessionsList();
                 this.updateSessionDetails();
@@ -6100,8 +6107,9 @@
 
                 if (!confirm(`Delete "${session.name}"? This will permanently delete all ${session.solves.length} solves.`)) return;
 
+                const removedSolveCount = (session.solves || []).length;
                 delete this.sessions[this.currentSessionId];
-                if (window.SyncTombstones) window.SyncTombstones.addDeletedSession(this.currentSessionId);
+                if (window.SyncTombstones) window.SyncTombstones.addDeletedSession(this.currentSessionId, removedSolveCount);
                 this.currentSessionId = 'no-session';
                 this.saveSessions();
                 this.renderSessionsList();
@@ -6933,7 +6941,7 @@
             resetSession() {
                 const session = this.sessions[this.currentSessionId];
                 if (confirm(`Are you sure? This will delete all ${session.solves.length} solves in "${session.name}".`)) {
-                    session.solves = [];
+                    if (window.AppSync?.resetSessionSolves) window.AppSync.resetSessionSolves(session); else session.solves = [];
                     this.hideNewBestIndicator();
                     this.saveSessions();
                     this.updateUI();

@@ -21,7 +21,8 @@
         _save(push = true) {
             this.state.updatedAt = Date.now();
             AppStorage.setJSON(STORAGE_KEY, this.state);
-            if (push) window.AppSync?.pushProgressionNow?.();
+            // Debounced + content-hashed in sync.js: several changes in a row = one write.
+            if (push) { const sync = window.AppSync; if (sync?.queueProgressionPush) sync.queueProgressionPush(); else sync?.pushProgressionNow?.(); }
             this.render();
             window.dispatchEvent(new CustomEvent('titlechange', { detail: { title: this.getEquippedTitle() } }));
         }
