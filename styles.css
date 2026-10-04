@@ -645,9 +645,7 @@
             mask-composite: exclude;
             filter: drop-shadow(0 0 5px rgba(60, 205, 247, 0.9));
             pointer-events: none;
-            /* Keep the timer frame stable; the moving highlight looked like a
-               scroll/swipe affordance on touch screens. */
-            animation: none;
+            animation: timer-neon-orbit 4.2s linear infinite;
         }
 
         .timer-container > * {
