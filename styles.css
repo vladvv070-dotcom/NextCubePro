@@ -6474,6 +6474,51 @@ body.light-theme .shop-confirm-overlay{background:rgba(226,232,240,.45)}body.lig
 @media(max-width:760px){.shop-skin-card>.shop-skin-actions{grid-column:2;justify-self:start;align-items:flex-start}}
 @media(max-width:620px){.metal-fx-modal{border-radius:18px}.metal-fx-header,.metal-fx-library,.metal-fx-editor{padding:.85rem}.metal-fx-slots{grid-template-columns:repeat(2,minmax(0,1fr))}.metal-fx-settings{grid-template-columns:1fr}.metal-fx-preview{min-height:145px}}
 .metal-fx-fallback.timer-display,.metal-fx-preview.metal-fx-fallback{background:var(--metal-fallback-gradient);background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:0 0 16px rgba(190,210,230,.6)!important}
+
+/* Timer skin layout and effects. All digit effects inherit the user's selected timer font. */
+.timer-container{width:min(94vw,600px);height:280px;min-height:280px}
+.timer-display{font-size:clamp(4rem,8vw,7.5rem)}
+.timer-display.timer-skin-svg-hidden:not(.inspection-countdown){color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important}
+.timer-skin-svg-overlay{position:absolute;inset:0;z-index:2;width:100%;height:100%;overflow:visible;pointer-events:none}
+.timer-skin-svg-overlay text{font-family:inherit}
+.timer-container.timer-fluid-hover-host{isolation:isolate}
+.timer-container.timer-fluid-hover-host .timer-display{z-index:2}
+.timer-container.fluid-text-hover-fallback .timer-display.timer-skin-fluid-hover:not(.inspection-countdown){background:linear-gradient(105deg,#1b1b1b,#b7b7b7,#282828,#f4f4f4,#252525);background-size:220% 100%;background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none;animation:metalFxPreviewGlint 4s linear infinite}
+.fluid-text-hover-canvas{position:absolute;inset:0;z-index:3;width:100%;height:100%;pointer-events:none}
+.shop-skin-card{grid-template-columns:minmax(190px,230px) minmax(0,1fr) auto;padding:1rem;gap:1.1rem}
+.shop-skin-preview{min-height:112px}
+.shop-skin-preview-demo,.skin-neon-demo,.skin-corgo-demo{font-family:var(--timer-skin-font-family,inherit);font-size:clamp(1.8rem,3vw,2.7rem);font-weight:700;line-height:1;letter-spacing:inherit}
+.shop-skin-flow-svg{width:min(100%,220px);height:96px}
+.shop-skin-flow-svg text{font-family:var(--timer-skin-font-family,inherit);font-size:42px;font-weight:700}
+.shop-skin-action{min-width:180px;min-height:50px;padding:.8rem 1rem;border:1px solid color-mix(in srgb,#38bdf8 48%,transparent);border-radius:12px;background:linear-gradient(135deg,#0284c7,#38bdf8);color:#fff;font:850 .86rem Manrope,sans-serif;cursor:pointer;box-shadow:0 6px 18px rgba(2,132,199,.2);transition:transform .16s ease,filter .16s ease,box-shadow .16s ease}
+.shop-skin-action.buy{border-color:color-mix(in srgb,#f59e0b 52%,transparent);background:linear-gradient(135deg,#c2410c,#f59e0b);box-shadow:0 6px 18px rgba(234,88,12,.22)}
+.shop-skin-action.equipped{border-color:color-mix(in srgb,#22c55e 50%,transparent);background:linear-gradient(135deg,#15803d,#22c55e)}
+.shop-skin-action:not(:disabled):hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 9px 24px rgba(2,132,199,.26)}
+.shop-skin-action:disabled{opacity:.76;cursor:default}
+.shop-skin-actions{min-width:190px}
+.shop-skin-card>.shop-skin-action{justify-self:stretch}
+.timer-display.timer-skin-linear-shine:not(.inspection-countdown){background:linear-gradient(to right,#fff 20%,#ff0 40%,#ff0 60%,#fff 80%);background-size:200% auto;background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none;animation:skinLinearShine 1s linear infinite}
+.timer-display.timer-skin-spectrum-glow:not(.inspection-countdown){background:linear-gradient(90deg,hsl(calc(var(--skin-hue)*1turn),95%,65%),hsl(calc(var(--skin-hue)*1turn + 90deg),95%,65%));background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;filter:url(#timer-spectrum-glow);animation:skinHueCycle 4s linear infinite}
+.skin-neon-sign-demo,.timer-display.timer-skin-neon-sign:not(.inspection-countdown){color:#ffe6ff!important;-webkit-text-fill-color:#ffe6ff!important;text-shadow:0 0 .6rem #ffe6ff,0 0 1.5rem #ff65bd,-.2rem .1rem 1rem #ff65bd,.2rem .1rem 1rem #ff65bd,0 -.5rem 2rem #ff2483,0 .5rem 3rem #ff2483;animation:neonSignGlow 3s infinite}
+.timer-display.timer-skin-neon-sign:not(.inspection-countdown) .skin-neon-char{color:inherit;-webkit-text-fill-color:inherit}
+.skin-neon-char.fast-flicker{animation:neonSignBlink 10s 1s infinite}
+.skin-neon-char.flicker{animation:neonSignBlink 3s 2s infinite}
+/* Match the supplied neon sign's shine, blink, and irregular flicker while keeping the selected timer font. */
+.skin-neon-sign-demo,.timer-display.timer-skin-neon-sign:not(.inspection-countdown){animation:timerNeonShine 2s forwards,timerNeonFlicker 3s infinite}
+.skin-neon-char.fast-flicker{animation:timerNeonShine 2s forwards,timerNeonBlink 10s 1s infinite}
+.skin-neon-char.flicker{animation:timerNeonShine 2s forwards,timerNeonBlink 3s 2s infinite}
+@keyframes timerNeonShine{0%{color:#6b1839;text-shadow:none}100%{color:#ffe6ff;text-shadow:0 0 .6rem #ffe6ff,0 0 1.5rem #ff65bd,-.2rem .1rem 1rem #ff65bd,.2rem .1rem 1rem #ff65bd,0 -.5rem 2rem #ff2483,0 .5rem 3rem #ff2483}}
+@keyframes timerNeonBlink{0%,22%,36%,75%{color:#ffe6ff;text-shadow:0 0 .6rem #ffe6ff,0 0 1.5rem #ff65bd,-.2rem .1rem 1rem #ff65bd,.2rem .1rem 1rem #ff65bd,0 -.5rem 2rem #ff2483,0 .5rem 3rem #ff2483}28%,33%{color:#ff65bd;text-shadow:none}82%,97%{color:#ff2483;text-shadow:none}}
+@keyframes timerNeonFlicker{from{opacity:1}4%{opacity:.9}6%{opacity:.85}8%{opacity:.95}10%{opacity:.9}11%{opacity:.922}12%{opacity:.9}14%{opacity:.95}16%{opacity:.98}17%{opacity:.9}19%{opacity:.93}20%{opacity:.99}24%{opacity:1}26%{opacity:.94}28%{opacity:.98}37%{opacity:.93}38%{opacity:.5}39%{opacity:.96}42%{opacity:1}44%{opacity:.97}46%{opacity:.94}56%,58%{opacity:.9}60%{opacity:.99}68%{opacity:1}70%{opacity:.9}72%{opacity:.95}93%{opacity:.93}95%{opacity:.95}97%{opacity:.93}to{opacity:1}}
+@keyframes neonSignGlow{0%,22%,36%,75%,100%{text-shadow:0 0 .6rem #ffe6ff,0 0 1.5rem #ff65bd,-.2rem .1rem 1rem #ff65bd,.2rem .1rem 1rem #ff65bd,0 -.5rem 2rem #ff2483,0 .5rem 3rem #ff2483}28%,33%{text-shadow:none}82%,97%{text-shadow:0 0 .3rem #ff2483,0 0 1rem #ff2483}}
+@keyframes neonSignBlink{0%,22%,36%,75%,100%{opacity:1}28%,33%{opacity:.55}82%,97%{opacity:.72}}
+.skin-shimmer-char{color:transparent;background:linear-gradient(110deg,#ff416c 0%,#ff416c 22%,#fff 32%,#4b7bec 44%,#8b5cf6 57%,#ff416c 72%);background-size:250% 100%;background-position:calc(var(--char-index)*8%) 50%;background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 0 .08em rgba(255,65,108,.65),0 0 .35em rgba(103,84,255,.55);animation:skinNeonShimmer 4s linear infinite}
+.timer-skin-shimmer-wrap{display:inline-block}
+.skin-corgo-demo{display:inline-flex;color:transparent}
+.metal-fx-slot-preview span,.metal-fx-preview-text{font-family:var(--timer-skin-font-family,inherit)}
+.metal-fx-save{align-self:center;min-width:min(100%,240px);min-height:48px;padding:.75rem 1.2rem;border:1px solid rgba(192,132,252,.5);border-radius:12px;background:linear-gradient(135deg,#6d28d9,#a855f7);color:#fff;font:850 .82rem Manrope,sans-serif;cursor:pointer;box-shadow:0 8px 24px rgba(124,58,237,.24)}
+@media(max-width:760px){.timer-container{width:min(92vw,500px);height:230px;min-height:230px}.timer-display{font-size:clamp(3.6rem,11vw,6rem)}.shop-skin-card{grid-template-columns:minmax(105px,.8fr) minmax(0,1.2fr);gap:.7rem}.shop-skin-preview{min-height:100px}.shop-skin-action,.shop-skin-actions{grid-column:2;min-width:0;justify-self:stretch;width:100%}.shop-skin-action{min-height:48px}.shop-skin-actions{align-items:stretch}.shop-skin-actions .shop-skin-action{width:100%}}
+@media(prefers-reduced-motion:reduce){.skin-neon-sign-demo,.timer-display.timer-skin-neon-sign,.skin-neon-char,.skin-shimmer-char{animation:none!important}}
 .metal-fx-preview.metal-fx-fallback .metal-fx-preview-text{color:transparent}
 .metal-fx-buy-more:disabled{opacity:.45;cursor:not-allowed;filter:saturate(.55)}
 .metal-fx-preview.metal-fx-fallback .metal-fx-preview-text{background:var(--metal-fallback-gradient);background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:0 0 14px rgba(190,210,230,.55)}
