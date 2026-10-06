@@ -12,10 +12,11 @@
             this.state = this._load();
             this._timer = null;
             this.sessionStartedAt = Date.now();
+            this._applyTimerSkin();
         }
 
         _defaultState() {
-            return { version: 1, rewardLedger: {}, inventoryLedger: {}, unlocked: {}, events: {}, frozenDays: {}, freezeCancelledDays: {}, activeBoostUntil: 0, ownedTitles: {}, equippedTitle: null, titleUpdatedAt: 0, daily: null, updatedAt: 0 };
+            return { version: 1, rewardLedger: {}, inventoryLedger: {}, unlocked: {}, events: {}, frozenDays: {}, freezeCancelledDays: {}, activeBoostUntil: 0, ownedTitles: {}, equippedTitle: null, titleUpdatedAt: 0, ownedSkins: {}, equippedSkin: null, skinUpdatedAt: 0, skinGradient: { colors: ['#ff5a8a', '#9b5de5', '#00d4ff'], direction: 90, updatedAt: 0 }, legendaryMetalSlots: [], equippedMetalSlotId: null, metalFxUpdatedAt: 0, daily: null, updatedAt: 0 };
         }
         _load() { return { ...this._defaultState(), ...(AppStorage.getJSON(STORAGE_KEY, {}) || {}) }; }
         _save(push = true) {
@@ -24,10 +25,11 @@
             // Debounced + content-hashed in sync.js: several changes in a row = one write.
             if (push) { const sync = window.AppSync; if (sync?.queueProgressionPush) sync.queueProgressionPush(); else sync?.pushProgressionNow?.(); }
             this.render();
+            this._applyTimerSkin();
             window.dispatchEvent(new CustomEvent('titlechange', { detail: { title: this.getEquippedTitle() } }));
         }
         exportState() { return JSON.parse(JSON.stringify(this.state)); }
-        clearLocalState() { this.state=this._defaultState();AppStorage.setJSON(STORAGE_KEY,this.state);this.ensureDaily();this.render(); }
+        clearLocalState() { this.state=this._defaultState();AppStorage.setJSON(STORAGE_KEY,this.state);this.ensureDaily();this._applyTimerSkin();this.render(); }
         mergeCloudState(remote) {
             if (!remote) return;
             const local = this.state;
@@ -39,6 +41,15 @@
             merged.frozenDays = { ...(remote.frozenDays || {}), ...(local.frozenDays || {}) };
             merged.freezeCancelledDays = { ...(remote.freezeCancelledDays || {}), ...(local.freezeCancelledDays || {}) };
             merged.ownedTitles = { ...(remote.ownedTitles || {}), ...(local.ownedTitles || {}) };
+            merged.ownedSkins = { ...(remote.ownedSkins || {}), ...(local.ownedSkins || {}) };
+            const metalSlots=new Map();[...(remote.legendaryMetalSlots||[]),...(local.legendaryMetalSlots||[])].forEach(slot=>{const previous=metalSlots.get(slot.id);if(!previous||Number(slot.updatedAt||0)>=Number(previous.updatedAt||0))metalSlots.set(slot.id,slot);});
+            merged.legendaryMetalSlots=[...metalSlots.values()];
+            if(Number(remote.metalFxUpdatedAt||0)>Number(local.metalFxUpdatedAt||0)){merged.equippedMetalSlotId=remote.equippedMetalSlotId||null;merged.metalFxUpdatedAt=Number(remote.metalFxUpdatedAt||0);}
+            else{merged.equippedMetalSlotId=local.equippedMetalSlotId||null;merged.metalFxUpdatedAt=Number(local.metalFxUpdatedAt||0);}
+            if(Number(remote.skinUpdatedAt||0)>Number(local.skinUpdatedAt||0)){merged.equippedSkin=remote.equippedSkin||null;merged.skinUpdatedAt=Number(remote.skinUpdatedAt||0);}
+            else{merged.equippedSkin=local.equippedSkin||null;merged.skinUpdatedAt=Number(local.skinUpdatedAt||0);}
+            if(Number(remote.skinGradient?.updatedAt||0)>Number(local.skinGradient?.updatedAt||0)) merged.skinGradient=remote.skinGradient;
+            else merged.skinGradient=local.skinGradient||this._defaultState().skinGradient;
             if (Number(remote.titleUpdatedAt || 0) > Number(local.titleUpdatedAt || 0)) {
                 merged.equippedTitle = remote.equippedTitle || null;
                 merged.titleUpdatedAt = Number(remote.titleUpdatedAt || 0);
@@ -61,6 +72,7 @@
             } else if (remote.daily && (!local.daily || remote.daily.date > local.daily.date)) merged.daily = remote.daily;
             this.state = merged;
             AppStorage.setJSON(STORAGE_KEY, merged);
+            this._applyTimerSkin();
             this.ensureDaily();
             window.dispatchEvent(new CustomEvent('titlechange', { detail: { title: this.getEquippedTitle() } }));
             this.scheduleEvaluation('cloud');
@@ -71,6 +83,66 @@
             const out = { freezes: 0, coinBoosters: 0, dnfInsurance: 0 };
             Object.values(this.state.inventoryLedger || {}).forEach(x => { if (x.type in out) out[x.type] += Number(x.amount || 0); });
             return out;
+        }
+        _normalizedGradient(){
+            const value=this.state.skinGradient||{},defaults=['#ff5a8a','#9b5de5','#00d4ff'];
+            const colors=Array.from({length:3},(_,i)=>/^#[\da-f]{6}$/i.test(value.colors?.[i]||'')?value.colors[i]:defaults[i]);
+            return {colors,direction:Math.max(0,Math.min(360,Number(value.direction)||0))};
+        }
+        _metalPresets(){return window.LEGENDARY_METAL_PRESETS||[];}
+        _defaultMetalConfig(){const p=this._metalPresets().find(x=>x.name==='Obsidian')||this._metalPresets()[0];return {presetName:p?.name||'Obsidian',colors:[...(p?.colors||['#111','#222','#333','#000','#101'])],scale:p?.physics.scale??6,complexity:p?.physics.complexity??1,contrast:p?.physics.contrast??1.8,flow:p?.physics.flow??0,hue:0,speed:.5,lightMode:false};}
+        _metalSlot(id=this.state.equippedMetalSlotId){return (this.state.legendaryMetalSlots||[]).find(x=>x.id===id)||null;}
+        _metalConfigForPreset(name){const p=this._metalPresets().find(x=>x.name===name),previous=this.metalFxDraft||this._defaultMetalConfig();return p?{...this._defaultMetalConfig(),presetName:p.name,colors:[...p.colors],scale:p.physics.scale,complexity:p.physics.complexity,contrast:p.physics.contrast,flow:p.physics.flow,speed:previous.speed,lightMode:previous.lightMode}:this._defaultMetalConfig();}
+        _escapeHtml(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+        _metalLabel(ru,en){return this._lang()==='ru'?ru:en;}
+        openLegendaryMetal(){const ru=this._lang()==='ru';DOM('metalFxTitle').textContent=ru?'Мастерская жидкого металла':'Liquid Metal FX Workshop';DOM('metalFxLibraryCopy').textContent=ru?'Каждая ячейка — отдельный купленный слот со своим пресетом и настройками. Можно покупать дополнительные слоты и хранить разные варианты.':'Each cell is a separately purchased slot with its own preset and settings. Buy more slots to keep different configurations.';DOM('metalFxBuyMore').textContent=ru?'Купить ещё один слот · 10 000 монет':'Buy another slot · 10,000 coins';DOM('metalFxBuyMore').disabled=this.coins<10000;DOM('metalFxSaveNote').textContent=ru?'Настройки сохраняются отдельно для этого слота. Изменения применяются бесплатно.':'Settings are saved to this slot. Changes are free.';DOM('metalFxPresetLabel').textContent=ru?'Пресет эффекта':'Effect preset';DOM('metalFxScaleLabel').textContent=ru?'Масштаб':'Scale';DOM('metalFxComplexityLabel').textContent=ru?'Сложность':'Complexity';DOM('metalFxContrastLabel').textContent=ru?'Контраст':'Contrast';DOM('metalFxHueLabel').textContent=ru?'Сдвиг цвета':'Color Shift';DOM('metalFxSpeedLabel').textContent=ru?'Скорость потока':'Flow Speed';DOM('metalFxMode').textContent=ru?'Светлый режим':'Light Mode';DOM('metalFxTweak').textContent=ru?'Настроить FX':'Tweak FX';const sel=DOM('metalFxPresetSelect');sel.innerHTML=this._metalPresets().map(p=>`<option value="${this._escapeHtml(p.name)}">${this._escapeHtml(p.name)}</option>`).join('');this.renderLegendaryMetalSlots();DOM('metalFxLibraryPanel').classList.remove('hidden');DOM('metalFxEditorPanel').classList.add('hidden');DOM('metalFxBack').classList.add('hidden');DOM('metalFxOverlay').classList.add('visible');this.metalFxEditingSlotId=null;}
+        renderLegendaryMetalSlots(){const host=DOM('metalFxSlots');if(!host)return;const ru=this._lang()==='ru',slots=this.state.legendaryMetalSlots||[],active=this.state.equippedMetalSlotId;host.innerHTML=slots.length?slots.map((slot,i)=>{const c=slot.config||this._defaultMetalConfig(),colors=(c.colors||[]).slice(0,4),stops=colors.map((x,j)=>`${x} ${Math.round(j/Math.max(1,colors.length-1)*100)}%`).join(', '),id=this._escapeHtml(slot.id);return `<article class="metal-fx-slot${active===slot.id?' is-equipped':''}"><div class="metal-fx-slot-preview"><span style="--metal-preview-gradient:linear-gradient(110deg,${stops||'#111,#ddd'})">12.34</span></div><strong>${ru?'Ячейка':'Slot'} ${String(i+1).padStart(2,'0')}</strong><small>${this._escapeHtml(c.presetName||'Obsidian')}</small><div class="metal-fx-slot-actions"><button type="button" data-equip-metal-slot="${id}">${active===slot.id?(ru?'Используется':'Active'):(ru?'Применить':'Use')}</button><button type="button" data-edit-metal-slot="${id}" aria-label="${ru?'Настроить':'Edit'}">⚙</button></div></article>`;}).join(''):`<p class="metal-fx-empty">${ru?'Купленных ячеек пока нет. Купите первую, чтобы выбрать пресет и настроить эффект.':'No slots yet. Buy one to select a preset and adjust the effect.'}</p>`;}
+        editLegendaryMetalSlot(id){const slot=this._metalSlot(id);if(!slot)return;this.metalFxEditingSlotId=id;this.metalFxDraft=JSON.parse(JSON.stringify(slot.config||this._defaultMetalConfig()));const ru=this._lang()==='ru';DOM('metalFxTitle').textContent=ru?`Настройка: ${this.metalFxDraft.presetName}`:`Edit: ${this.metalFxDraft.presetName}`;DOM('metalFxLibraryPanel').classList.add('hidden');DOM('metalFxEditorPanel').classList.remove('hidden');DOM('metalFxBack').classList.remove('hidden');DOM('metalFxSettings').classList.add('hidden');DOM('metalFxPresetSelect').value=this.metalFxDraft.presetName;this._syncMetalFxControls();DOM('timerDisplay')?.classList.remove('timer-skin-metal-fx');const host=DOM('metalFxPreview'),ok=window.LegendaryMetalFx?.mount(host,DOM('metalFxPreviewText'),this.metalFxDraft,'12.34');host.classList.toggle('metal-fx-fallback',!ok);host.style.setProperty('--metal-fallback-gradient',`linear-gradient(110deg,${(this.metalFxDraft.colors||[]).join(',')})`);}
+        _syncMetalFxControls(){const c=this.metalFxDraft||this._defaultMetalConfig(),set=(id,v)=>{const e=DOM(id);if(e)e.value=v;};set('metalFxPresetSelect',c.presetName);set('metalFxScale',c.scale);set('metalFxComplexity',c.complexity);set('metalFxContrast',c.contrast);set('metalFxHue',c.hue);set('metalFxSpeed',c.speed);DOM('metalFxMode').textContent=c.lightMode?this._metalLabel('Тёмный режим','Dark Mode'):this._metalLabel('Светлый режим','Light Mode');DOM('metalFxPreviewCaption').textContent=this._metalLabel(`Пресет «${c.presetName}» · нажмите на цифры, чтобы выбрать следующий` ,`Preset “${c.presetName}” · click the digits to cycle`);this._updateMetalFxOutputs();}
+        _updateMetalFxOutputs(){const c=this.metalFxDraft||{},set=(id,v)=>{if(DOM(id))DOM(id).textContent=v;};set('metalFxScaleValue',Number(c.scale||0).toFixed(1));set('metalFxComplexityValue',Number(c.complexity||0).toFixed(1));set('metalFxContrastValue',Number(c.contrast||0).toFixed(1));set('metalFxHueValue',`${Math.round(Number(c.hue||0)*57.29)}°`);set('metalFxSpeedValue',`${Math.round(Number(c.speed||0)*200)}%`);}
+        _updateMetalFxDraft(key,value){if(!this.metalFxDraft)return;if(key==='presetName'){this.metalFxDraft=this._metalConfigForPreset(value);this._syncMetalFxControls();}else this.metalFxDraft[key]=value;if(key==='lightMode')this._syncMetalFxControls();window.LegendaryMetalFx?.setConfig(this.metalFxDraft);this._saveMetalFxDraft();}
+        _saveMetalFxDraft(){clearTimeout(this._metalFxSaveTimer);this._metalFxSaveTimer=setTimeout(()=>this._commitMetalFxDraft(),350);}
+        _commitMetalFxDraft(){clearTimeout(this._metalFxSaveTimer);const slot=this._metalSlot(this.metalFxEditingSlotId);if(!slot||!this.metalFxDraft)return;const now=Date.now();slot.config=JSON.parse(JSON.stringify(this.metalFxDraft));slot.updatedAt=now;this.state.metalFxUpdatedAt=now;this.state.updatedAt=now;AppStorage.setJSON(STORAGE_KEY,this.state);window.AppSync?.queueProgressionPush?.();this.renderLegendaryMetalSlots();}
+        equipLegendaryMetalSlot(id){const slot=this._metalSlot(id);if(!slot)return false;const now=Date.now();this.state.equippedMetalSlotId=id;this.state.equippedSkin='legendary-metal-fx';this.state.ownedSkins={...(this.state.ownedSkins||{}),'legendary-metal-fx':this.state.ownedSkins?.['legendary-metal-fx']||now};this.state.metalFxUpdatedAt=now;this.state.skinUpdatedAt=now;this._save();DOM('metalFxOverlay').classList.remove('visible');return true;}
+        closeLegendaryMetal(){if(this.metalFxEditingSlotId)this._commitMetalFxDraft();this.metalFxEditingSlotId=null;this.metalFxDraft=null;DOM('metalFxOverlay').classList.remove('visible');window.LegendaryMetalFx?.unmount();this._applyTimerSkin();}
+        _applyTimerSkin(){
+            const display=DOM('timerDisplay');if(!display)return;
+            const owned=this.state.ownedSkins||{},skins=window.TIMER_SKIN_CATALOG?.skins||[];
+            const activeId=owned[this.state.equippedSkin]?this.state.equippedSkin:Object.entries(owned).sort((a,b)=>Number(b[1])-Number(a[1])).map(([id])=>id)[0]||null;
+            const active=skins.find(skin=>skin.id===activeId),isGradient=activeId==='custom-gradient',isHolographic=activeId==='holographic-foil',isBlazing=activeId==='blazing-glow',isCyanPulse=activeId==='soft-cyan-pulse',isShimmering=activeId==='shimmering-neon',isFluid=activeId==='fluid-gradient',isMetal=activeId==='legendary-metal-fx',metalSlot=isMetal?this._metalSlot():null,isFire=active?.assetType==='animated-svg',isImage=!!active?.asset&&!isFire;
+            display.classList.toggle('timer-skin-custom-gradient',isGradient);
+            display.classList.toggle('timer-skin-holographic',isHolographic);
+            display.classList.toggle('timer-skin-blazing',isBlazing);
+            display.classList.toggle('timer-skin-cyan-pulse',isCyanPulse);
+            display.classList.toggle('timer-skin-shimmering-neon',isShimmering);
+            display.classList.toggle('timer-skin-fluid-gradient',isFluid);
+            display.classList.toggle('timer-skin-metal-fx',isMetal&&!!metalSlot);
+            display.classList.toggle('timer-skin-image-texture',isImage);
+            display.classList.toggle('timer-skin-fire-fill',isFire);
+            if(isGradient){const {colors,direction}=this._normalizedGradient();display.style.setProperty('--custom-timer-gradient',`linear-gradient(${direction}deg, ${colors.join(', ')})`);}
+            else display.style.removeProperty('--custom-timer-gradient');
+            if(isImage||isFire)display.style.setProperty('--timer-skin-image',`url("${active.asset}")`);
+            else display.style.removeProperty('--timer-skin-image');
+            if(isMetal&&metalSlot){const ok=window.LegendaryMetalFx?.mount(display,display,metalSlot.config);display.classList.toggle('metal-fx-fallback',!ok);display.style.setProperty('--metal-fallback-gradient',`linear-gradient(110deg,${(metalSlot.config?.colors||[]).join(',')})`);}
+            else{display.classList.remove('metal-fx-fallback');display.style.removeProperty('--metal-fallback-gradient');if(window.LegendaryMetalFx?.host===display)window.LegendaryMetalFx.unmount();}
+        }
+        _updateHolographicPointer(element,event){
+            const rect=element.getBoundingClientRect();if(!rect.width||!rect.height)return;
+            const x=Math.max(0,Math.min(100,(event.clientX-rect.left)/rect.width*100));
+            const y=Math.max(0,Math.min(100,(event.clientY-rect.top)/rect.height*100));
+            element.style.setProperty('--holo-x',`${x}%`);element.style.setProperty('--holo-y',`${y}%`);
+        }
+        _saveGradientFromControls(){
+            const host=DOM('shopSkinsTiers');if(!host||!this.state.ownedSkins?.['custom-gradient'])return;
+            const colors=[...host.querySelectorAll('[data-gradient-color]')].map(input=>input.value);
+            const direction=Number(host.querySelector('[data-gradient-direction]')?.value??90);
+            this.state.skinGradient={colors,direction,updatedAt:Date.now()};
+            this.state.updatedAt=Date.now();
+            AppStorage.setJSON(STORAGE_KEY,this.state);
+            const sync=window.AppSync;if(sync?.queueProgressionPush)sync.queueProgressionPush();else sync?.pushProgressionNow?.();
+            this._applyTimerSkin();
+            const preview=host.querySelector('.skin-custom-gradient');if(preview)preview.style.setProperty('--custom-timer-gradient',`linear-gradient(${direction}deg, ${colors.join(', ')})`);
+            const angle=host.querySelector('[data-gradient-angle]');if(angle)angle.textContent=`${direction}°`;
         }
         getFrozenDays() {
             const cancelled = this.state.freezeCancelledDays || {};
@@ -256,6 +328,17 @@
             this.state.events.shopPurchase=Date.now();this._save();this.scheduleEvaluation('shopPurchase');
             this._toast(this._lang()==='ru'?`Титул «${title.name.ru}» куплен`:`Title “${title.name.en}” purchased`,'success');return true;
         }
+        purchaseSkin(skinId){
+            const skin=window.TIMER_SKIN_CATALOG?.skins.find(item=>item.id===skinId);if(!skin)return false;if(skin.multiPurchase)return this.purchaseLegendaryMetalSlot(skin);if(this.state.ownedSkins?.[skinId])return false;
+            if(this.coins<skin.price){this._toast(this._lang()==='ru'?'Недостаточно монет':'Not enough coins');return false;}
+            const ledgerId=`skinPurchase:${skinId}`;
+            if(!this.state.rewardLedger[ledgerId])this.state.rewardLedger[ledgerId]={amount:-skin.price,at:Date.now(),kind:'skinPurchase',skinId};
+            const purchasedAt=Date.now();this.state.ownedSkins={...(this.state.ownedSkins||{}),[skinId]:purchasedAt};this.state.equippedSkin=skinId;this.state.skinUpdatedAt=purchasedAt;
+            if(skinId==='custom-gradient'&&!this.state.skinGradient)this.state.skinGradient=this._defaultState().skinGradient;
+            this.state.events.shopPurchase=Date.now();this._save();this.scheduleEvaluation('shopPurchase');
+            this._toast(this._lang()==='ru'?`Скин «${skin.name.ru}» куплен`:`“${skin.name.en}” purchased`,'success');return true;
+        }
+        purchaseLegendaryMetalSlot(skin=window.TIMER_SKIN_CATALOG?.skins.find(item=>item.id==='legendary-metal-fx')){if(!skin||this.coins<skin.price){this._toast(this._lang()==='ru'?'Недостаточно монет':'Not enough coins');return false;}const now=Date.now(),slotId=`metal-${now.toString(36)}-${Math.random().toString(36).slice(2,8)}`,config=this._defaultMetalConfig();this.state.rewardLedger[`skinPurchase:${skin.id}:${slotId}`]={amount:-skin.price,at:now,kind:'skinPurchase',skinId:skin.id,slotId};this.state.legendaryMetalSlots=[...(this.state.legendaryMetalSlots||[]),{id:slotId,config,createdAt:now,updatedAt:now}];this.state.ownedSkins={...(this.state.ownedSkins||{}),[skin.id]:this.state.ownedSkins?.[skin.id]||now};this.state.equippedSkin=skin.id;this.state.equippedMetalSlotId=slotId;this.state.skinUpdatedAt=now;this.state.metalFxUpdatedAt=now;this.state.events.shopPurchase=now;this._save();this.scheduleEvaluation('shopPurchase');this.renderSkinsCatalog(this._lang()==='ru');this._toast(this._lang()==='ru'?'Легендарная ячейка «Obsidian» куплена':'Legendary “Obsidian” slot purchased','success');this.openLegendaryMetal();return true;}
         equipTitle(titleId) {
             const title=this.getTitle(titleId);if(!title||!this.state.ownedTitles?.[titleId])return false;
             this.state.equippedTitle=titleId;this.state.titleUpdatedAt=Date.now();this._save();
@@ -341,6 +424,20 @@
             DOM('shopClose')?.addEventListener('click',()=>DOM('shopOverlay')?.classList.remove('visible'));
             DOM('shopOverlay')?.addEventListener('click',e=>{if(e.target.id==='shopOverlay')e.currentTarget.classList.remove('visible');});
             DOM('shopItemsGrid')?.addEventListener('click',e=>{const buy=e.target.closest('[data-buy-item]'),use=e.target.closest('[data-use-item]');if(buy)this.requestPurchase(buy.dataset.buyItem);if(use?.dataset.useItem==='coinBoosters')this.activateCoinBooster();});
+            DOM('shopSkinsTiers')?.addEventListener('click',e=>{const buy=e.target.closest('[data-buy-skin]'),library=e.target.closest('[data-open-metal-library]');if(buy)this.requestSkinPurchase(buy.dataset.buySkin);if(library)this.openLegendaryMetal();});
+            DOM('metalFxBuyMore')?.addEventListener('click',()=>this.requestSkinPurchase('legendary-metal-fx'));
+            DOM('metalFxClose')?.addEventListener('click',()=>this.closeLegendaryMetal());
+            DOM('metalFxOverlay')?.addEventListener('click',e=>{if(e.target.id==='metalFxOverlay')this.closeLegendaryMetal();});
+            DOM('metalFxBack')?.addEventListener('click',()=>{this._commitMetalFxDraft();this.metalFxEditingSlotId=null;this.metalFxDraft=null;window.LegendaryMetalFx?.unmount();this._applyTimerSkin();this.openLegendaryMetal();});
+            DOM('metalFxSlots')?.addEventListener('click',e=>{const use=e.target.closest('[data-equip-metal-slot]'),edit=e.target.closest('[data-edit-metal-slot]');if(use)this.equipLegendaryMetalSlot(use.dataset.equipMetalSlot);if(edit)this.editLegendaryMetalSlot(edit.dataset.editMetalSlot);});
+            DOM('metalFxPresetSelect')?.addEventListener('change',e=>this._updateMetalFxDraft('presetName',e.target.value));
+            DOM('metalFxSettings')?.addEventListener('input',e=>{const map={metalFxScale:'scale',metalFxComplexity:'complexity',metalFxContrast:'contrast',metalFxHue:'hue',metalFxSpeed:'speed'},key=map[e.target.id];if(key)this._updateMetalFxDraft(key,Number(e.target.value));});
+            DOM('metalFxMode')?.addEventListener('click',()=>{if(this.metalFxDraft)this._updateMetalFxDraft('lightMode',!this.metalFxDraft.lightMode);});
+            DOM('metalFxTweak')?.addEventListener('click',()=>{const panel=DOM('metalFxSettings');panel.classList.toggle('hidden');DOM('metalFxTweak').classList.toggle('active',!panel.classList.contains('hidden'));});
+            DOM('metalFxPreview')?.addEventListener('click',()=>{if(!this.metalFxDraft)return;const list=this._metalPresets(),index=list.findIndex(p=>p.name===this.metalFxDraft.presetName);this._updateMetalFxDraft('presetName',list[(index+1)%list.length]?.name);});
+            DOM('shopSkinsTiers')?.addEventListener('input',e=>{if(e.target.matches('[data-gradient-color],[data-gradient-direction]'))this._saveGradientFromControls();});
+            DOM('shopSkinsTiers')?.addEventListener('pointermove',e=>{const preview=e.target.closest('.skin-holographic-demo,.skin-fluid-gradient-demo');if(preview)this._updateHolographicPointer(preview,e);});
+            DOM('timerDisplay')?.addEventListener('pointermove',e=>{if(e.currentTarget.classList.contains('timer-skin-holographic')||e.currentTarget.classList.contains('timer-skin-fluid-gradient'))this._updateHolographicPointer(e.currentTarget,e);});
             document.querySelectorAll('[data-shop-section]').forEach(button=>button.addEventListener('click',()=>{this.shopSection=button.dataset.shopSection;this.renderShop();}));
             DOM('shopTitlesList')?.addEventListener('click',e=>{const buy=e.target.closest('[data-buy-title]'),equip=e.target.closest('[data-equip-title]');if(buy)this.requestTitlePurchase(buy.dataset.buyTitle);if(equip)this.equipTitle(equip.dataset.equipTitle);});
             DOM('shopTitleUnequip')?.addEventListener('click',()=>this.unequipTitle());
@@ -354,6 +451,7 @@
             const ru=this._lang()==='ru',names=ru?{freezes:'Заморозка ударного режима',dnfInsurance:'Страховка от DNF',coinBoosters:'Удвоитель монет'}:{freezes:'Streak Freeze',dnfInsurance:'DNF Insurance',coinBoosters:'Coin Doubler'};
             this.pendingPurchaseType=type;
             this.pendingTitlePurchase=null;
+            this.pendingSkinPurchase=null;
             const set=(id,value)=>{if(DOM(id))DOM(id).textContent=value};
             DOM('shopConfirmIcon').classList.remove('title-preview-mode');DOM('shopConfirmIcon').innerHTML=this._assetIcon(type,'shop-confirm-product-image');set('shopConfirmTitle',ru?'Подтвердить покупку':'Confirm purchase');
             set('shopConfirmText',ru?`Купить «${names[type]}» за ${product.price.toLocaleString('ru-RU')} монет?`:`Buy “${names[type]}” for ${product.price.toLocaleString('en-US')} coins?`);
@@ -362,14 +460,23 @@
         }
         requestTitlePurchase(titleId){
             const title=this.getTitle(titleId);if(!title||this.state.ownedTitles?.[titleId])return;
-            const ru=this._lang()==='ru';this.pendingTitlePurchase=titleId;this.pendingPurchaseType=null;
+            const ru=this._lang()==='ru';this.pendingTitlePurchase=titleId;this.pendingPurchaseType=null;this.pendingSkinPurchase=null;
             DOM('shopConfirmIcon').classList.add('title-preview-mode');DOM('shopConfirmIcon').innerHTML=this._titleMarkup(title,'shop-confirm-title-preview');
             DOM('shopConfirmTitle').textContent=ru?'Подтвердить покупку':'Confirm purchase';
             DOM('shopConfirmText').textContent=ru?`Купить титул «${title.name.ru}» за ${title.price.toLocaleString('ru-RU')} монет?`:`Buy the “${title.name.en}” title for ${title.price.toLocaleString('en-US')} coins?`;
             DOM('shopConfirmCancel').textContent=ru?'Отмена':'Cancel';DOM('shopConfirmBuy').textContent=ru?'Купить':'Buy';DOM('shopConfirmOverlay')?.classList.add('visible');this.fitTitleElements(DOM('shopConfirmIcon'));
         }
-        cancelPurchaseConfirmation(){this.pendingPurchaseType=null;this.pendingTitlePurchase=null;DOM('shopConfirmOverlay')?.classList.remove('visible');}
-        confirmPurchase(){const type=this.pendingPurchaseType,titleId=this.pendingTitlePurchase;this.cancelPurchaseConfirmation();if(type)this.purchaseItem(type);else if(titleId)this.purchaseTitle(titleId);}
+        requestSkinPurchase(skinId){
+            const skin=window.TIMER_SKIN_CATALOG?.skins.find(item=>item.id===skinId);if(!skin||(!skin.multiPurchase&&this.state.ownedSkins?.[skinId]))return;
+            if(this.coins<skin.price){this._toast(this._lang()==='ru'?'Недостаточно монет':'Not enough coins');return;}
+            const ru=this._lang()==='ru';this.pendingSkinPurchase=skinId;this.pendingTitlePurchase=null;this.pendingPurchaseType=null;
+            DOM('shopConfirmIcon').classList.remove('title-preview-mode');DOM('shopConfirmIcon').textContent='🎨';
+            DOM('shopConfirmTitle').textContent=ru?'Подтвердить покупку':'Confirm purchase';
+            DOM('shopConfirmText').textContent=skin.multiPurchase?(ru?`Купить отдельную настраиваемую ячейку за ${skin.price.toLocaleString('ru-RU')} монет? Каждый повторный заказ создаёт новый слот.`:`Buy one separately configurable slot for ${skin.price.toLocaleString('en-US')} coins? Each purchase creates a new slot.`):(ru?`Купить скин «${skin.name.ru}» за ${skin.price.toLocaleString('ru-RU')} монет?`:`Buy the “${skin.name.en}” skin for ${skin.price.toLocaleString('en-US')} coins?`);
+            DOM('shopConfirmCancel').textContent=ru?'Отмена':'Cancel';DOM('shopConfirmBuy').textContent=ru?'Купить':'Buy';DOM('shopConfirmOverlay')?.classList.add('visible');
+        }
+        cancelPurchaseConfirmation(){this.pendingPurchaseType=null;this.pendingTitlePurchase=null;this.pendingSkinPurchase=null;DOM('shopConfirmOverlay')?.classList.remove('visible');}
+        confirmPurchase(){const type=this.pendingPurchaseType,titleId=this.pendingTitlePurchase,skinId=this.pendingSkinPurchase;this.cancelPurchaseConfirmation();if(type)this.purchaseItem(type);else if(titleId)this.purchaseTitle(titleId);else if(skinId)this.purchaseSkin(skinId);}
         _requireAuth(feature){
             if(window.CubeAuth?.getCurrentUser?.()?.uid||AppStorage.getJSON('authUser')?.uid)return true;
             const ru=this._lang()==='ru',isShop=feature==='shop';
@@ -379,19 +486,41 @@
             DOM('authWarningOverlay')?.classList.add('visible');return false;
         }
         open(tab='achievements') { if(!this._requireAuth('progression'))return;this.ensureDaily();this.activeTab=tab;DOM('progressionOverlay')?.classList.add('visible');this.render(); }
-        openShop(){if(!this._requireAuth('shop'))return;this.ensureDaily();DOM('shopOverlay')?.classList.add('visible');this.renderShop();}
+        openShop(){if(!this._requireAuth('shop'))return;this.ensureDaily();this.shopSection='skins';DOM('shopOverlay')?.classList.add('visible');this.renderShop();}
         renderShop(){
             const root=DOM('shopOverlay');if(!root)return;const ru=this._lang()==='ru',inv=this.inventory;
             const text=ru?{title:'Магазин',skins:'Скины',effects:'Эффекты',items:'Предметы',titles:'Титулы',soon:'Скоро',owned:'В инвентаре',buy:'Купить',use:'Активировать',active:'Удвоитель активен до',freeze:['Заморозка ударного режима','Автоматически спасает стрик, если пропущен один день. Замороженный день становится синим и не засчитывается в идеальную неделю.'],insurance:['Страховка от DNF','Одноразово позволяет исправить DNF или +2. Сгорает сразу после исправления штрафа.'],booster:['Удвоитель монет','После активации удваивает награды за достижения и задания дня в течение 24 часов.']}:{title:'Shop',skins:'Skins',effects:'Effects',items:'Items',titles:'Titles',soon:'Soon',owned:'In inventory',buy:'Buy',use:'Activate',active:'Coin doubler active until',freeze:['Streak Freeze','Automatically saves your streak after one missed day. The frozen day is blue and prevents a perfect week.'],insurance:['DNF Insurance','Lets you correct one DNF or +2. Consumed immediately when the penalty is corrected.'],booster:['Coin Doubler','After activation, doubles achievement and daily-task rewards for 24 hours.']};
-            const set=(id,v)=>{if(DOM(id))DOM(id).textContent=v};set('shopTitle',text.title);set('shopSkinsTab',text.skins);set('shopEffectsTab',text.effects);set('shopItemsTab',text.items);set('shopTitlesTab',text.titles);set('shopItemsTitle',text.items);set('shopTitlesTitle',text.titles);['shopSkinsSoon','shopEffectsSoon'].forEach(id=>set(id,text.soon));
+            const set=(id,v)=>{if(DOM(id))DOM(id).textContent=v};set('shopTitle',text.title);set('shopSkinsTab',text.skins);set('shopEffectsTab',text.effects);set('shopItemsTab',text.items);set('shopTitlesTab',text.titles);set('shopItemsTitle',text.items);set('shopTitlesTitle',text.titles);set('shopEffectsSoon',text.soon);
+            this.renderSkinsCatalog(ru);
             const section=this.shopSection||'items';
             document.querySelectorAll('[data-shop-section]').forEach(button=>button.classList.toggle('active',button.dataset.shopSection===section));
-            DOM('shop-section-items')?.classList.toggle('active',section==='items');DOM('shop-section-titles')?.classList.toggle('active',section==='titles');
+            DOM('shop-section-skins')?.classList.toggle('active',section==='skins');DOM('shop-section-items')?.classList.toggle('active',section==='items');DOM('shop-section-titles')?.classList.toggle('active',section==='titles');
             set('shopCoins',this.coins);set('shopFreezes',inv.freezes);set('shopBoosters',inv.coinBoosters);set('shopInsurance',inv.dnfInsurance);
             const boost=DOM('shopActiveBoost');boost?.classList.toggle('hidden',!this.isBoostActive());if(boost&&this.isBoostActive())boost.innerHTML=`${this._assetIcon('coinBoosters')}<span>${text.active} ${new Intl.DateTimeFormat(ru?'ru-RU':'en-US',{dateStyle:'short',timeStyle:'short'}).format(new Date(this.state.activeBoostUntil))}</span>`;
             const cards=[['freezes',text.freeze,1000,inv.freezes],['dnfInsurance',text.insurance,600,inv.dnfInsurance],['coinBoosters',text.booster,800,inv.coinBoosters]];
             DOM('shopItemsGrid').innerHTML=cards.map(([type,copy,price,owned])=>`<article class="shop-item-card"><div class="shop-item-icon">${this._assetIcon(type,'shop-product-image')}</div><h4>${copy[0]}</h4><p>${copy[1]}</p><div class="shop-item-owned">${text.owned}: ${owned}</div><div class="shop-item-actions"><button class="shop-buy-btn" data-buy-item="${type}" ${this.coins<price?'disabled':''}>${text.buy} · ${price} ${this._assetIcon('coins','inline-economy-icon')}</button>${type==='coinBoosters'?`<button class="shop-use-btn" data-use-item="${type}" ${owned<1||this.isBoostActive()?'disabled':''}>${text.use}</button>`:''}</div></article>`).join('');
             this.renderTitlesShop();
+        }
+        renderSkinsCatalog(ru=this._lang()==='ru'){
+            const catalog=window.TIMER_SKIN_CATALOG,host=DOM('shopSkinsTiers');if(!catalog||!host)return;
+            const fmt=value=>Number(value).toLocaleString(ru?'ru-RU':'en-US');
+            DOM('shopSkinsTitle').textContent=ru?'Скины таймера':'Timer Skins';
+            DOM('shopSkinsIntro').textContent=ru?'Текстуры, эффекты и анимации цифр таймера. Цены предварительные; часть коллекции появится позже.':'Textures, effects and animations for the timer digits. Prices are provisional; more of the collection will arrive later.';
+            host.innerHTML=catalog.tiers.map(tier=>{
+                const items=catalog.skins.filter(skin=>skin.tier===tier.id);
+                const cards=items.length?items.map(skin=>{
+                    const isGlow=skin.id==='spectrum-glow',isCorgo=skin.id==='corgo-bounce',isHolo=skin.id==='holographic-foil',isBlazing=skin.id==='blazing-glow',isCyanPulse=skin.id==='soft-cyan-pulse',isShimmering=skin.id==='shimmering-neon',isFluid=skin.id==='fluid-gradient',isMetal=skin.id==='legendary-metal-fx',isFire=skin.assetType==='animated-svg',isTexture=!!skin.asset&&!isFire,previewClass=isGlow?'skin-spectrum-glow':isBlazing?'skin-blazing-demo':isCyanPulse?'skin-cyan-pulse-demo':isShimmering?'skin-shimmering-neon-demo':isFluid?'skin-fluid-gradient-demo':skin.id==='linear-shine'?'skin-shine-demo':'skin-neon-demo';
+                    const isCustom=skin.id==='custom-gradient',owned=!!this.state.ownedSkins?.[skin.id],metalCount=(this.state.legendaryMetalSlots||[]).length,gradient=this._normalizedGradient(),gradientCss=`linear-gradient(${gradient.direction}deg, ${gradient.colors.join(', ')})`;
+                    const filter=isGlow?`<svg class="shop-skin-filter" width="0" height="0" aria-hidden="true"><filter id="skin-glow-${skin.id}" x="-50%" y="-200%" width="200%" height="500%"><feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blurred"/><feBlend in="SourceGraphic" in2="blurred" result="glow"/><feColorMatrix in="glow" type="saturate" values="1.3" result="saturated"/><feBlend in="SourceGraphic" in2="saturated"/></filter></svg>`:'';
+                    const isFlowing=skin.id==='flowing-gradient';
+                    const digitPreview=isMetal?`<span class="shop-skin-preview-demo metal-fx-catalog-preview">12.34</span>`:isFire?`<span class="shop-skin-preview-demo skin-fire-fill-demo" style="--timer-skin-image:url('${skin.asset}')">12.34</span>`:isTexture?`<span class="shop-skin-preview-demo skin-image-texture-demo" style="--timer-skin-image:url('${skin.asset}')">12.34</span>`:isCustom?`<span class="shop-skin-preview-demo skin-custom-gradient" style="--custom-timer-gradient:${gradientCss}">12.34</span>`:isFlowing?`<svg class="shop-skin-flow-svg" viewBox="0 0 160 52" role="img" aria-label="12.34"><defs><linearGradient id="skin-gradient-${skin.id}" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#33235b"/><stop offset="25%" stop-color="#d62229"/><stop offset="50%" stop-color="#e97639"/><stop offset="75%" stop-color="#792042"/><stop offset="100%" stop-color="#33235b"/></linearGradient><pattern id="skin-pattern-${skin.id}" x="0" y="0" width="320" height="52" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="160" height="52" fill="url(#skin-gradient-${skin.id})"><animate attributeName="x" from="0" to="160" dur="7s" repeatCount="indefinite"/></rect><rect x="-160" y="0" width="160" height="52" fill="url(#skin-gradient-${skin.id})"><animate attributeName="x" from="-160" to="0" dur="7s" repeatCount="indefinite"/></rect></pattern></defs><text x="50%" y="50%" dy=".35em" text-anchor="middle" fill="url(#skin-pattern-${skin.id})" font-family="ui-monospace,monospace" font-size="36" font-weight="700">12.34</text></svg>`:isCorgo?`<span class="skin-corgo-demo" aria-label="12.34">${Array.from('12.34', (char,index)=>`<span class="skin-corgo-char" data-char="${char}" style="--char-index:${index}">${char}</span>`).join('')}</span>`:isHolo?`<span class="shop-skin-preview-demo skin-holographic-demo" data-holo-label="12.34">12.34</span>`:`<span class="shop-skin-preview-demo ${previewClass}" ${isGlow?`style="filter:url(#skin-glow-${skin.id})"`:''}>12.34</span>`;
+                    const canBuy=skin.status==='available';
+                    const action=isMetal?`<div class="shop-skin-actions"><button class="shop-buy-btn shop-skin-buy" data-buy-skin="${skin.id}" ${this.coins<skin.price?'disabled':''}>${ru?'Купить слот':'Buy slot'} · ${fmt(skin.price)} ${this._assetIcon('coins','inline-economy-icon')}</button>${metalCount?`<button class="metal-fx-owned-button" data-open-metal-library>${ru?'Куплено':'Purchased'} · ${metalCount}</button>`:''}</div>`:(isCustom||canBuy)?(owned?`<span class="shop-skin-status">${ru?'Куплено':'Owned'}</span>`:`<button class="shop-buy-btn shop-skin-buy" data-buy-skin="${skin.id}" ${this.coins<skin.price?'disabled':''}>${ru?'Купить':'Buy'} · ${fmt(skin.price)} ${this._assetIcon('coins','inline-economy-icon')}</button>`):`<span class="shop-skin-status">${ru?'Скоро':'Coming soon'}</span>`;
+                    const editor=isCustom&&owned?`<div class="shop-gradient-editor"><label>${ru?'Цвет 1':'Color 1'}<input type="color" data-gradient-color value="${gradient.colors[0]}"></label><label>${ru?'Цвет 2':'Color 2'}<input type="color" data-gradient-color value="${gradient.colors[1]}"></label><label>${ru?'Цвет 3':'Color 3'}<input type="color" data-gradient-color value="${gradient.colors[2]}"></label><label class="shop-gradient-direction">${ru?'Направление':'Direction'}<span><input type="range" min="0" max="360" step="1" data-gradient-direction value="${gradient.direction}"><output data-gradient-angle>${gradient.direction}°</output></span></label><p>${ru?'Настройки сохраняются автоматически. Меняйте их бесплатно в любое время.':'Settings save automatically. Change them for free at any time.'}</p></div>`:'';
+                    return `<article class="shop-skin-card"><div class="shop-skin-preview">${filter}${digitPreview}</div><div class="shop-skin-copy"><h4>${this._text(skin.name)}</h4><p>${this._text(skin.description)}</p><span class="shop-skin-price">${fmt(skin.price)} ${ru?'монет':'coins'}</span></div>${action}${editor}</article>`;
+                }).join(''):`<p class="shop-skin-empty">${ru?'Скины этого уровня появятся позже':'Skins for this tier will be added later'}</p>`;
+                return `<section class="shop-skin-tier" data-skin-tier="${tier.id}"><div class="shop-skin-tier-heading"><h4>${tier.order}. ${this._text(tier.name)}</h4><span>${fmt(tier.minPrice)}–${fmt(tier.maxPrice)} ${ru?'монет':'coins'}</span></div>${cards}</section>`;
+            }).join('');
         }
         renderTitlesShop(){
             const list=DOM('shopTitlesList');if(!list)return;const ru=this._lang()==='ru',owned=this.state.ownedTitles||{},equipped=this.state.equippedTitle;

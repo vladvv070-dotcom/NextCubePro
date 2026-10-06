@@ -45,7 +45,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Anybody:wght@300;400;600;700&family=Manrope:wght@400;500;600;700;800&family=Montserrat:wght@700;900&family=Cinzel:wght@900&family=JetBrains+Mono:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Space+Grotesk:wght@400;600;700&family=Orbitron:wght@400;600;700;900&family=Bebas+Neue&family=Playfair+Display:wght@400;600;700&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="styles.css?v=2.10.11">
+    <link rel="stylesheet" href="styles.css?v=2.11.6">
     <link rel="stylesheet" href="leaderboard.css?v=2.10.11">
 
     <script type="application/ld+json">
@@ -898,13 +898,18 @@
             </div>
             <div class="settings-body shop-body">
                 <div class="settings-sidebar shop-sidebar">
-                    <button class="settings-nav-item shop-nav-locked" disabled><span>🎨</span><span id="shopSkinsTab">Skins</span><small id="shopSkinsSoon">Soon</small></button>
+                    <button class="settings-nav-item" data-shop-section="skins"><span>🎨</span><span id="shopSkinsTab">Skins</span></button>
                     <button class="settings-nav-item shop-nav-locked" disabled><span>✨</span><span id="shopEffectsTab">Effects</span><small id="shopEffectsSoon">Soon</small></button>
                     <button class="settings-nav-item active" data-shop-section="items"><span>🎒</span><span id="shopItemsTab">Items</span></button>
                     <button class="settings-nav-item" data-shop-section="titles"><span>🏷️</span><span id="shopTitlesTab">Titles</span></button>
                 </div>
                 <div class="settings-content-area shop-content">
                     <div class="shop-wallet-line"><span><img class="economy-icon" src="./images/shop/coin.png" alt=""><strong id="shopCoins">0</strong></span><span><img class="economy-icon" src="./images/shop/streak-freeze.png" alt=""><strong id="shopFreezes">0</strong></span><span><img class="economy-icon" src="./images/shop/coin-booster.png" alt=""><strong id="shopBoosters">0</strong></span><span><img class="economy-icon" src="./images/shop/dnf-insurance.png" alt=""><strong id="shopInsurance">0</strong></span></div>
+                    <div class="settings-section-content" id="shop-section-skins">
+                        <h3 class="section-title" id="shopSkinsTitle">Skins</h3>
+                        <p class="shop-skins-intro" id="shopSkinsIntro"></p>
+                        <div class="shop-skins-tiers" id="shopSkinsTiers"></div>
+                    </div>
                     <div class="settings-section-content active" id="shop-section-items">
                         <h3 class="section-title" id="shopItemsTitle">Items</h3>
                         <p class="shop-active-boost hidden" id="shopActiveBoost"></p>
@@ -931,6 +936,38 @@
                 <button class="new-session-btn" id="shopConfirmBuy" type="button">Buy</button>
             </div>
         </div>
+    </div>
+
+    <div class="settings-overlay metal-fx-overlay" id="metalFxOverlay">
+        <section class="metal-fx-modal" role="dialog" aria-modal="true" aria-labelledby="metalFxTitle">
+            <header class="metal-fx-header">
+                <button class="metal-fx-back hidden" id="metalFxBack" type="button">←</button>
+                <div><span class="metal-fx-eyebrow">LEGENDARY · 10 000 🪙 / SLOT</span><h2 id="metalFxTitle">Liquid Metal FX</h2></div>
+                <button class="settings-close-new" id="metalFxClose" type="button" aria-label="Close">×</button>
+            </header>
+            <div class="metal-fx-library" id="metalFxLibraryPanel">
+                <p class="metal-fx-copy" id="metalFxLibraryCopy"></p>
+                <div class="metal-fx-slots" id="metalFxSlots"></div>
+                <button class="metal-fx-buy-more" id="metalFxBuyMore" type="button"></button>
+            </div>
+            <div class="metal-fx-editor hidden" id="metalFxEditorPanel">
+                <div class="metal-fx-toolbar">
+                    <label class="metal-fx-select-label"><span id="metalFxPresetLabel">Effect preset</span><select id="metalFxPresetSelect"></select></label>
+                    <button class="metal-fx-mode" id="metalFxMode" type="button">Light Mode</button>
+                    <button class="metal-fx-tweak" id="metalFxTweak" type="button">Tweak FX</button>
+                </div>
+                <div class="metal-fx-preview" id="metalFxPreview"><span class="metal-fx-preview-text" id="metalFxPreviewText">12.34</span></div>
+                <p class="metal-fx-preview-caption" id="metalFxPreviewCaption"></p>
+                <div class="metal-fx-settings hidden" id="metalFxSettings">
+                    <label><span><b id="metalFxScaleLabel">Scale</b><output id="metalFxScaleValue">6.0</output></span><input type="range" id="metalFxScale" min="0" max="100" step="0.1"></label>
+                    <label><span><b id="metalFxComplexityLabel">Complexity</b><output id="metalFxComplexityValue">1.0</output></span><input type="range" id="metalFxComplexity" min="0" max="25" step="0.1"></label>
+                    <label><span><b id="metalFxContrastLabel">Contrast</b><output id="metalFxContrastValue">1.8</output></span><input type="range" id="metalFxContrast" min="0" max="25" step="0.1"></label>
+                    <label><span><b id="metalFxHueLabel">Color Shift</b><output id="metalFxHueValue">0°</output></span><input type="range" id="metalFxHue" min="0" max="10" step="0.1"></label>
+                    <label><span><b id="metalFxSpeedLabel">Flow Speed</b><output id="metalFxSpeedValue">100%</output></span><input type="range" id="metalFxSpeed" min="0" max="20" step="0.1"></label>
+                </div>
+                <p class="metal-fx-save-note" id="metalFxSaveNote"></p>
+            </div>
+        </section>
     </div>
 
     <!-- Global leaderboard -->
@@ -1509,7 +1546,7 @@
     </div>
 
     <!-- Version Display -->
-    <div class="version-display">2.10.11</div>
+    <div class="version-display">2.11.9</div>
 
     <!-- Solve History Context Menu -->
     <div class="sh-context-menu" id="shContextMenu">
@@ -1638,7 +1675,10 @@
     <script defer src="translations.js?v=2.10.11"></script>
     <script defer src="progression-data.js?v=2.10.11"></script>
     <script defer src="titles-data.js?v=2.10.11"></script>
-    <script defer src="progression-system.js?v=2.10.11"></script>
+    <script defer src="skins-data.js?v=2.11.6"></script>
+    <script defer src="legendary-metal-presets.js?v=2.10.15"></script>
+    <script defer src="legendary-metal-fx.js?v=2.10.15"></script>
+    <script defer src="progression-system.js?v=2.11.6"></script>
     <script defer src="leaderboard.js?v=2.10.11"></script>
     <script defer src="algs-database.js"></script>
     <script defer src="lang-utils.js"></script>
