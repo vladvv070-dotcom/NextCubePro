@@ -46,7 +46,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Anybody:wght@300;400;600;700&family=Manrope:wght@400;500;600;700;800&family=Montserrat:wght@700;900&family=Cinzel:wght@900&family=JetBrains+Mono:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Space+Grotesk:wght@400;600;700&family=Orbitron:wght@400;600;700;900&family=Bebas+Neue&family=Playfair+Display:wght@400;600;700&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="styles.css?v=2.11.7">
-    <link rel="stylesheet" href="leaderboard.css?v=2.10.11">
+    <link rel="stylesheet" href="leaderboard.css?v=2.10.12">
 
     <script type="application/ld+json">
     {
@@ -1448,6 +1448,9 @@
                     <button class="new-session-btn cancel" id="authChangeNicknameBtn">Изменить ник</button>
                 </div>
                 <div class="new-session-actions">
+                    <button class="new-session-btn danger" id="authDeleteAccountBtn">Удалить аккаунт</button>
+                </div>
+                <div class="new-session-actions">
                     <button class="new-session-btn cancel" id="authAccountCloseBtn">Закрыть</button>
                     <button class="new-session-btn danger" id="authLogoutBtn">Выйти</button>
                 </div>
@@ -1470,6 +1473,16 @@
                     <button class="new-session-btn cancel" id="authLogoutCancelBtn">Отмена</button>
                     <button class="new-session-btn danger" id="authLogoutConfirmBtn">Выйти</button>
                 </div>
+            </div>
+            <div id="authDeleteAccountView" style="display:none;">
+                <div class="new-session-title" id="authDeleteAccountTitle">Удалить аккаунт?</div>
+                <p class="auth-warning-text" id="authDeleteAccountWarning">Это действие необратимо. Будут удалены аккаунт, сборки, синхронизация и записи в таблице лидеров.</p>
+                <div class="new-session-actions">
+                    <button class="new-session-btn cancel" id="authDeleteAccountCancelBtn">Отмена</button>
+                    <button class="new-session-btn danger" id="authDeleteAccountConfirmBtn">Удалить навсегда</button>
+                </div>
+                <p class="auth-error" id="authDeleteAccountError"></p>
+                <p class="auth-warning-text hidden" id="authDeleteAccountStatus"></p>
             </div>
         </div>
     </div>
@@ -1547,7 +1560,7 @@
     </div>
 
     <!-- Version Display -->
-    <div class="version-display">2.11.10</div>
+    <div class="version-display">2.12.0</div>
 
     <!-- Solve History Context Menu -->
     <div class="sh-context-menu" id="shContextMenu">
@@ -1666,28 +1679,28 @@
     </div>
 
     <script type="module">
-        if (location.protocol !== 'file:') import('./firebase-init.js?v=2.10.11');
+        if (location.protocol !== 'file:') import('./firebase-init.js?v=2.10.12');
     </script>
     <script defer src="cube-engine.js"></script>
     <script defer src="storage.js"></script>
-    <script defer src="sync.js?v=2.10.11"></script>
+    <script defer src="sync.js?v=2.10.12"></script>
     <script defer src="dom-cache.js"></script>
     <script defer src="commentary-data.js"></script>
-    <script defer src="translations.js?v=2.10.11"></script>
-    <script defer src="progression-data.js?v=2.10.11"></script>
-    <script defer src="titles-data.js?v=2.10.11"></script>
+    <script defer src="translations.js?v=2.10.12"></script>
+    <script defer src="progression-data.js?v=2.10.12"></script>
+    <script defer src="titles-data.js?v=2.10.12"></script>
     <script defer src="skins-data.js?v=2.11.6"></script>
     <script defer src="legendary-metal-presets.js?v=2.10.15"></script>
     <script defer src="legendary-metal-fx.js?v=2.10.15"></script>
     <script defer src="https://robindelaporte.fr/codepen/bundle.js"></script>
     <script defer src="timer-skin-effects.js?v=2.11.7"></script>
     <script defer src="progression-system.js?v=2.11.7"></script>
-    <script defer src="leaderboard.js?v=2.10.11"></script>
+    <script defer src="leaderboard.js?v=2.10.12"></script>
     <script defer src="algs-database.js"></script>
     <script defer src="lang-utils.js"></script>
     <script defer src="algs-i18n.js"></script>
-    <script defer src="backgrounds-data.js?v=2.10.11"></script>
-    <script defer src="script.js?v=2.10.11"></script>
+    <script defer src="backgrounds-data.js?v=2.10.12"></script>
+    <script defer src="script.js?v=2.10.12"></script>
 <!-- Algs Trainer Modal -->
 <div class="algs-overlay" id="algsOverlay">
     <div class="algs-modal">

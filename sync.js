@@ -659,6 +659,10 @@ const AppSync = {
 
         const user = window.CubeAuth?.getCurrentUser?.();
         if (!user) return false;
+        // An account deletion is a multi-step operation.  Do not let a
+        // background sync recreate Firestore/leaderboard data after one cloud
+        // step has already completed but before Auth deletion finishes.
+        if (AppStorage.getRaw(`accountDeletionPending:${user.uid}`)) return false;
 
         // ---- Account switch: local caches belong to a different identity ----
         // Local tombstones and the local sessions cache live in this browser's

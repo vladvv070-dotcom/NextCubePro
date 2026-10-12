@@ -2961,6 +2961,11 @@
                             DOM('authNewNicknameLabel').textContent = t.authNewNicknameLabel;
                             DOM('authChangeNicknameSaveBtn').textContent = t.authChangeNicknameSaveBtn;
                             DOM('authChangeNicknameCancelBtn').textContent = t.authChangeNicknameCancelBtn;
+                            DOM('authDeleteAccountBtn').textContent = t.authDeleteAccountBtn;
+                            DOM('authDeleteAccountTitle').textContent = t.authDeleteAccountTitle;
+                            DOM('authDeleteAccountWarning').textContent = t.authDeleteAccountWarning;
+                            DOM('authDeleteAccountCancelBtn').textContent = t.authDeleteAccountCancelBtn;
+                            DOM('authDeleteAccountConfirmBtn').textContent = t.authDeleteAccountConfirmBtn;
                             DOM('authNewNickname').value = authUser.nickname || '';
                             const authChangeNicknameErrorEl = DOM('authChangeNicknameError');
                             if (authChangeNicknameErrorEl) authChangeNicknameErrorEl.classList.remove('visible');
@@ -2968,6 +2973,7 @@
                             DOM('authAccountView').style.display = '';
                             DOM('authChangeNicknameView').style.display = 'none';
                             DOM('authLogoutConfirmView').style.display = 'none';
+                            DOM('authDeleteAccountView').style.display = 'none';
                             DOM('authAccountOverlay').classList.add('visible');
                         } else {
                             DOM('authOverlay').classList.add('visible');
@@ -3086,6 +3092,77 @@
                         }
                     });
                 }
+                const authDeleteAccountBtn = document.getElementById('authDeleteAccountBtn');
+                const authDeleteAccountCancelBtn = document.getElementById('authDeleteAccountCancelBtn');
+                const authDeleteAccountConfirmBtn = document.getElementById('authDeleteAccountConfirmBtn');
+                const clearDeletedAccountLocalData = () => {
+                    // Keep device-level preferences, but remove account data,
+                    // auth caches, pending writes and safety copies.
+                    const keys = [
+                        'authUser', 'cubeTimerSessions', 'cubeTimerCurrentSession',
+                        'progressionStateV1', 'customPhrases', 'customPhrasesUpdatedAt',
+                        'deletedSolveIds', 'deletedSessionIds', 'pendingSolveIds',
+                        'pendingDeleteIds', 'cubeTimerSessionsSafetyBackup',
+                        'cubeTimerSessionsSafetyBackupInfo', 'lastSyncedUid',
+                        'lastSyncedAt', 'cloudSyncCursorV3', 'cloudSyncInitializedV3',
+                        'syncProtocolVersion', 'syncLocalSolveCount', 'leaderboardLastSig'
+                    ];
+                    try {
+                        keys.forEach(key => localStorage.removeItem(key));
+                        Object.keys(localStorage).filter(key =>
+                            key.startsWith('syncLocalSolveCount:') || key.startsWith('leaderboardLastSig:') || key.startsWith('accountDeletionPending:')
+                        ).forEach(key => localStorage.removeItem(key));
+                    } catch (_) { /* best effort; cloud deletion already completed */ }
+                };
+                authDeleteAccountBtn?.addEventListener('click', () => {
+                    DOM('authAccountView').style.display = 'none';
+                    DOM('authDeleteAccountView').style.display = '';
+                    DOM('authDeleteAccountError').classList.remove('visible');
+                    DOM('authDeleteAccountStatus').classList.add('hidden');
+                });
+                authDeleteAccountCancelBtn?.addEventListener('click', () => {
+                    DOM('authDeleteAccountView').style.display = 'none';
+                    DOM('authAccountView').style.display = '';
+                });
+                authDeleteAccountConfirmBtn?.addEventListener('click', async () => {
+                    const lang = getLang();
+                    const t = translations[lang];
+                    const errorEl = DOM('authDeleteAccountError');
+                    const statusEl = DOM('authDeleteAccountStatus');
+                    const setError = (message) => { errorEl.textContent = message; errorEl.classList.add('visible'); };
+                    errorEl.classList.remove('visible');
+                    statusEl.textContent = t.authDeleteAccountWorking;
+                    statusEl.classList.remove('hidden');
+                    authDeleteAccountConfirmBtn.disabled = true;
+                    try {
+                        const deletingUser = window.CubeAuth?.getCurrentUser?.();
+                        if (!deletingUser) throw Object.assign(new Error('auth-required'), { code: 'auth-required' });
+                        // Prevent sync/publish from recreating data while the
+                        // three deletion stages are running or awaiting retry.
+                        AppStorage.setJSON(`accountDeletionPending:${deletingUser.uid}`, { startedAt: Date.now() });
+                        // Order matters: keep Auth alive until Firestore and
+                        // Redis are gone. All three operations are retry-safe.
+                        await window.CubeAuth.deleteCurrentUserData();
+                        if (!window.leaderboard?.deleteRemoteAccount) throw new Error('leaderboard-delete-unavailable');
+                        await window.leaderboard.deleteRemoteAccount();
+                        await window.CubeAuth.deleteCurrentUser();
+                        clearDeletedAccountLocalData();
+                        statusEl.textContent = t.authDeleteAccountSuccess;
+                        window.dispatchEvent(new CustomEvent('firebase-auth-state', { detail: { user: null } }));
+                        setTimeout(() => DOM('authAccountOverlay')?.classList.remove('visible'), 900);
+                    } catch (error) {
+                        statusEl.classList.add('hidden');
+                        const code = error?.code || '';
+                        if (code === 'auth/requires-recent-login') {
+                            setError(t.authDeleteAccountReauth);
+                        } else {
+                            console.error('Account deletion failed:', error);
+                            setError(t.authDeleteAccountError);
+                        }
+                    } finally {
+                        authDeleteAccountConfirmBtn.disabled = false;
+                    }
+                });
                 const authCloseBtn = document.getElementById('authCloseBtn');
                 if (authCloseBtn) {
                     authCloseBtn.addEventListener('click', () => {

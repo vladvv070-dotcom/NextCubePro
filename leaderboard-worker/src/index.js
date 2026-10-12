@@ -14,6 +14,7 @@ export default{
       if(request.method==='GET'&&url.pathname==='/leaderboard')return await getLeaderboard(url,env,cors);
       if(request.method==='GET'&&url.pathname==='/dates')return await getDates(env,cors);
       if(request.method==='POST'&&url.pathname==='/publish')return await publish(request,env,cors);
+      if(request.method==='POST'&&url.pathname==='/delete-account')return await deleteAccount(request,env,cors);
       return json({error:'Not found'},404,cors);
     }catch(error){console.error(error);return json({error:'Internal server error'},500,cors);}
   }
@@ -43,6 +44,44 @@ async function publish(request,env,cors){
     commands.push(['ZADD',DATES_KEY,Date.parse(`${item.date}T00:00:00Z`),item.date]);
   }
   await pipeline(env,commands);
+  return json({ok:true},200,cors);
+}
+
+// Remove only the authenticated user's member from every leaderboard.  This
+// endpoint is deliberately idempotent: a client can retry it after a network
+// failure without affecting any other user's scores.  The Upstash token never
+// leaves the Worker.
+async function deleteAccount(request,env,cors){
+  const token=bearer(request);if(!token)return json({error:'Authentication required'},401,cors);
+  const account=await verifyFirebaseToken(token,env);if(!account?.localId)return json({error:'Invalid Firebase token'},401,cors);
+  const uid=account.localId;
+  const puzzleList=[...PUZZLES];
+  const commands=[['HDEL',PROFILE_KEY,uid],['DEL',`ncp:rate:${uid}`]];
+  for(const key of GLOBALS)commands.push(['ZREM',`ncp:board:${key}`,uid]);
+  for(const puzzle of PUZZLES){
+    commands.push(['ZREM',`ncp:board:pb:${puzzle}`,uid]);
+    for(const avg of['ao5','ao12','ao50','ao100'])commands.push(['ZREM',`ncp:board:best:${puzzle}:${avg}`,uid]);
+    for(const avg of['ao5','ao12','ao100'])commands.push(['ZREM',`ncp:board:current:${puzzle}:${avg}`,uid]);
+  }
+  await pipeline(env,commands);
+
+  // Daily boards are keyed by date and discipline.  Read the shared date
+  // index, remove only this UID, then remove an index date only when no daily
+  // board for that date contains any users.
+  const dates=await redis(env,['ZRANGE',DATES_KEY,0,-1]);
+  const dailyCommands=[];
+  for(const date of(dates||[]))for(const puzzle of puzzleList)dailyCommands.push(['ZREM',`ncp:board:daily:${date}:${puzzle}`,uid]);
+  for(let offset=0;offset<dailyCommands.length;offset+=400)await pipeline(env,dailyCommands.slice(offset,offset+400));
+  const countCommands=[];
+  for(const date of(dates||[]))for(const puzzle of puzzleList)countCommands.push(['ZCARD',`ncp:board:daily:${date}:${puzzle}`]);
+  const counts=[];
+  for(let offset=0;offset<countCommands.length;offset+=400)counts.push(...await pipeline(env,countCommands.slice(offset,offset+400)));
+  const emptyDates=[];
+  for(let i=0;i<(dates||[]).length;i++){
+    const first=i*puzzleList.length;
+    if(puzzleList.every((_,puzzleIndex)=>Number(counts[first+puzzleIndex]||0)===0))emptyDates.push(dates[i]);
+  }
+  for(let offset=0;offset<emptyDates.length;offset+=400)await pipeline(env,emptyDates.slice(offset,offset+400).map(date=>['ZREM',DATES_KEY,date]));
   return json({ok:true},200,cors);
 }
 

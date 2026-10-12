@@ -208,6 +208,52 @@ window.CubeAuth = {
     return auth.currentUser.getIdToken(forceRefresh);
   },
 
+  // Delete all Firebase data owned by the current user.  Firebase Auth does
+  // not cascade-delete Firestore documents, so the application removes the
+  // known user tree first and leaves the Auth record for the caller's final
+  // deleteUser() step.  The operation is idempotent and can be retried.
+  deleteCurrentUserData: async () => {
+    const user = auth.currentUser;
+    if (!user) throw Object.assign(new Error("Пользователь не авторизован"), { code: "auth-required" });
+
+    const userRef = doc(db, "users", user.uid);
+    const [userSnap, solvesSnap, tombstonesSnap, usernamesSnap] = await Promise.all([
+      getDoc(userRef),
+      getDocs(collection(db, "users", user.uid, "solves")),
+      getDocs(collection(db, "users", user.uid, "tombstones")),
+      getDocs(query(collection(db, "usernames"), where("uid", "==", user.uid)))
+    ]);
+
+    const refs = [
+      ...solvesSnap.docs.map(snap => snap.ref),
+      ...tombstonesSnap.docs.map(snap => snap.ref),
+      ...usernamesSnap.docs.map(snap => snap.ref)
+    ];
+    // Include the currently displayed nickname as a fallback for older data
+    // that may not be returned by the UID query.
+    const nickname = userSnap.exists() ? userSnap.data()?.nickname : user.displayName;
+    if (nickname) refs.push(doc(db, "usernames", normalizeNickname(nickname)));
+    refs.push(userRef);
+    const uniqueRefs = [...new Map(refs.map(ref => [ref.path, ref])).values()];
+
+    let deleted = 0;
+    for (let offset = 0; offset < uniqueRefs.length; offset += 400) {
+      const batch = writeBatch(db);
+      for (const ref of uniqueRefs.slice(offset, offset + 400)) batch.delete(ref);
+      await batch.commit();
+      deleted += Math.min(400, uniqueRefs.length - offset);
+    }
+    return { deleted, solves: solvesSnap.size, tombstones: tombstonesSnap.size, usernames: usernamesSnap.size };
+  },
+
+  // Final Auth step. Kept separate from Firestore deletion so a
+  // requires-recent-login error never reports a falsely completed deletion.
+  deleteCurrentUser: async () => {
+    const user = auth.currentUser;
+    if (!user) throw Object.assign(new Error("Пользователь не авторизован"), { code: "auth-required" });
+    return deleteUser(user);
+  },
+
   onAuthChange: (callback) => onAuthStateChanged(auth, callback),
 
   // Сменить ник у уже вошедшего пользователя. Всё (проверка нового ника,

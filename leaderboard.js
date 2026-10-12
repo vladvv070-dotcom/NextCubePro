@@ -79,7 +79,14 @@
         _sigKey(uid){return`leaderboardLastSig:${uid}`;}
         async publish(){
             if(!this.configured()||!window.timer||!window.CubeAuth?.getCurrentUser?.())return false;
-            try{const payload=this.metrics();const uid=window.CubeAuth.getCurrentUser().uid;const sig=JSON.stringify(payload);if(AppStorage.getRaw(this._sigKey(uid))===sig)return true;const token=await window.CubeAuth.getIdToken();const response=await fetch(`${API_URL}/publish`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify(payload)});if(!response.ok)throw new Error(`HTTP ${response.status}`);AppStorage.setRaw(this._sigKey(uid),sig);if(this.visible())this.load();return true;}catch(error){console.error('Leaderboard publish failed',error);return false;}
+            try{const uid=window.CubeAuth.getCurrentUser().uid;if(AppStorage.getRaw(`accountDeletionPending:${uid}`))return false;const payload=this.metrics();const sig=JSON.stringify(payload);if(AppStorage.getRaw(this._sigKey(uid))===sig)return true;const token=await window.CubeAuth.getIdToken();const response=await fetch(`${API_URL}/publish`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify(payload)});if(!response.ok)throw new Error(`HTTP ${response.status}`);AppStorage.setRaw(this._sigKey(uid),sig);if(this.visible())this.load();return true;}catch(error){console.error('Leaderboard publish failed',error);return false;}
+        }
+        async deleteRemoteAccount(){
+            if(!this.configured()||!window.CubeAuth?.getCurrentUser?.())throw Object.assign(new Error('auth-required'),{code:'auth-required'});
+            const token=await window.CubeAuth.getIdToken();
+            const response=await fetch(`${API_URL}/delete-account`,{method:'POST',headers:{'Authorization':`Bearer ${token}`}});
+            if(!response.ok){let detail='';try{detail=(await response.json()).error||'';}catch(_){}throw Object.assign(new Error(detail||`HTTP ${response.status}`),{code:`worker-${response.status}`});}
+            return response.json();
         }
         metrics(){
             const all=[];Object.values(window.timer.sessions||{}).forEach(session=>(session.solves||[]).forEach(s=>all.push({...s,discipline:session.discipline||'3x3',effective:s.dnf?Infinity:Number(s.time||0)+Number(s.penalty||0)})));
