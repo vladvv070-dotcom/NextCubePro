@@ -339,10 +339,12 @@
                 const exportCsvBtn = document.querySelector('#exportCsvBtn');
                 const importExportBtn = document.querySelector('#importExportBtn');
                 const importExportDataBtn = document.querySelector('#importExportDataBtn');
+                const privacyPolicyBtn = document.querySelector('#privacyPolicyBtn');
                 if (exportJsonBtn) exportJsonBtn.textContent = t.exportJSON;
                 if (exportCsvBtn) exportCsvBtn.textContent = t.exportCSV;
                 if (importExportBtn) importExportBtn.textContent = `📤 ${t.importExport || 'Import / Export'}`;
                 if (importExportDataBtn) importExportDataBtn.textContent = t.importExport || 'Import / Export';
+                if (privacyPolicyBtn) privacyPolicyBtn.textContent = t.privacyPolicy || 'Privacy Policy';
 
                 // Telegram channel promo button (top-right corner)
                 const tgPromoBtnLabel = document.querySelector('#tgPromoBtnLabel');
@@ -8859,6 +8861,45 @@
             }
         }
 
+        function initPrivacyPolicyUI(settingsManager) {
+            const button = document.getElementById('privacyPolicyBtn');
+            const overlay = document.getElementById('privacyPolicyOverlay');
+            const closeButton = document.getElementById('privacyPolicyCloseBtn');
+            const title = document.getElementById('privacyPolicyTitle');
+            const meta = document.getElementById('privacyPolicyMeta');
+            const content = document.getElementById('privacyPolicyContent');
+            if (!button || !overlay || !closeButton || !content || !window.NextCubeProPrivacyPolicy) return;
+
+            const render = () => {
+                const copy = window.NextCubeProPrivacyPolicy.get(settingsManager.settings.language);
+                title.textContent = copy.title;
+                meta.textContent = copy.meta;
+                content.innerHTML = copy.html;
+                closeButton.textContent = (translations[settingsManager.settings.language] || translations.en).close;
+            };
+            const open = () => {
+                render();
+                overlay.classList.add('visible');
+                overlay.setAttribute('aria-hidden', 'false');
+                closeButton.focus();
+            };
+            const close = () => {
+                overlay.classList.remove('visible');
+                overlay.setAttribute('aria-hidden', 'true');
+            };
+
+            button.addEventListener('click', open);
+            closeButton.addEventListener('click', close);
+            overlay.addEventListener('click', (event) => {
+                if (event.target === overlay) close();
+            });
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape' && overlay.classList.contains('visible')) close();
+            });
+            window.addEventListener('languagechange', render);
+            render();
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             const commentary = new CommentarySystem();
@@ -8873,6 +8914,7 @@
             window.timer = timer;
             window.sessionsManager = timer; // Alias for solve history
             window.hotkeyManager = hotkeyManager;
+            initPrivacyPolicyUI(settingsManager);
             const progression = new ProgressionSystem(timer, settingsManager);
             window.progression = progression;
             progression.init();
