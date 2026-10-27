@@ -20,6 +20,7 @@
         svgDefs: null,
         observer: null,
         fontObserver: null,
+        resizeObserver: null,
         generatedMarkup: false,
 
         apply(id, display) {
@@ -32,6 +33,8 @@
                 this.fontObserver?.disconnect();
                 this.fontObserver = new MutationObserver(() => this.sync());
                 this.fontObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-font'] });
+                this.resizeObserver = new ResizeObserver(() => this.sync());
+                this.resizeObserver.observe(display);
             }
             const nextId = id || null;
             if (this.activeId !== nextId) {
@@ -95,19 +98,50 @@
             const container = this.display.closest('.timer-container');
             if (!container) return;
             const displayStyle = getComputedStyle(this.display);
+            const updateGeometry = svg => {
+                const box = this.display.getBoundingClientRect();
+                const hostBox = container.getBoundingClientRect();
+                const width = Math.max(1, box.width), height = Math.max(1, box.height);
+                svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+                svg.setAttribute('preserveAspectRatio', 'none');
+                svg.style.left = `${box.left - hostBox.left}px`;
+                svg.style.top = `${box.top - hostBox.top}px`;
+                svg.style.width = `${width}px`;
+                svg.style.height = `${height}px`;
+                const pattern = svg.querySelector('pattern');
+                if (pattern) {
+                    pattern.setAttribute('width', width * 3);
+                    pattern.setAttribute('height', height);
+                    const rects = pattern.querySelectorAll('rect');
+                    const moves = pattern.querySelectorAll('animate');
+                    rects.forEach((rect, index) => {
+                        rect.setAttribute('width', width * 1.5);
+                        rect.setAttribute('height', height);
+                        rect.setAttribute('x', index === 0 ? 0 : -width * 1.5);
+                    });
+                    moves.forEach((move, index) => {
+                        move.setAttribute('from', index === 0 ? 0 : -width * 1.5);
+                        move.setAttribute('to', index === 0 ? width * 1.5 : 0);
+                    });
+                }
+                const text = svg.querySelector('text');
+                if (text) {
+                    text.setAttribute('x', width / 2);
+                    text.setAttribute('y', height / 2);
+                    text.setAttribute('dy', '0.34em');
+                    text.setAttribute('font-family', displayStyle.fontFamily);
+                    text.setAttribute('font-size', displayStyle.fontSize);
+                    text.setAttribute('font-weight', displayStyle.fontWeight);
+                    text.setAttribute('letter-spacing', displayStyle.letterSpacing);
+                }
+            };
             if (this.flowOverlay?.isConnected) {
                 const text = this.flowOverlay.querySelector('text');
                 if (text && text.textContent !== this.display.textContent) text.textContent = this.display.textContent || '';
-                if (text) {
-                    const fontScale = 1000 / Math.max(1, container.clientWidth);
-                    text.setAttribute('font-family', displayStyle.fontFamily);
-                    text.setAttribute('font-size', parseFloat(displayStyle.fontSize) * fontScale);
-                    text.setAttribute('font-weight', displayStyle.fontWeight);
-                    text.setAttribute('letter-spacing', (parseFloat(displayStyle.letterSpacing) || 0) * fontScale);
-                }
+                updateGeometry(this.flowOverlay);
                 return;
             }
-            const svg = makeSvg('svg', { class: 'timer-skin-svg-overlay', viewBox: '0 0 1000 300', preserveAspectRatio: 'xMidYMid meet', 'aria-hidden': 'true' });
+            const svg = makeSvg('svg', { class: 'timer-skin-svg-overlay', 'aria-hidden': 'true' });
             const defs = makeSvg('defs');
             const gradient = makeSvg('linearGradient', { id: 'timer-flow-gradient', x1: '0%', y1: '0%', x2: '100%', y2: '0%' });
             [['0%', '#33235b'], ['25%', '#D62229'], ['50%', '#E97639'], ['75%', '#792042'], ['100%', '#33235b']].forEach(([offset, color]) => gradient.appendChild(makeSvg('stop', { offset, 'stop-color': color })));
@@ -120,12 +154,12 @@
             second.appendChild(secondMove);
             pattern.append(first, second);
             defs.append(gradient, pattern);
-            const fontScale = 1000 / Math.max(1, container.clientWidth);
-            const text = makeSvg('text', { x: '50%', y: '50%', dy: '.35em', 'text-anchor': 'middle', fill: 'url(#timer-flow-pattern)', 'font-family': displayStyle.fontFamily, 'font-size': parseFloat(displayStyle.fontSize) * fontScale, 'font-weight': displayStyle.fontWeight, 'letter-spacing': (parseFloat(displayStyle.letterSpacing) || 0) * fontScale });
+            const text = makeSvg('text', { 'text-anchor': 'middle', fill: 'url(#timer-flow-pattern)' });
             text.textContent = this.display.textContent || '';
             svg.append(defs, text);
             container.appendChild(svg);
             this.flowOverlay = svg;
+            updateGeometry(svg);
         },
 
         _removeFlowSvg() {
