@@ -4,7 +4,7 @@
     const policy = {
         en: {
             title: 'Next Cube Pro Privacy Policy',
-            meta: 'Effective date: [insert publication date] · Website: https://nextcubepro.com · Contact: [insert a working project email address]',
+            meta: 'Effective date: 27 October 2026 · Website: https://nextcubepro.com · Support: support@nextcubepro.com',
             html: `
                 <h3>1. Introduction</h3>
                 <p>Next Cube Pro (“NCP”, “we”, “our”, or the “Service”) is an online speedcubing service that provides a timer, solve history, statistics, and a global leaderboard.</p>
@@ -36,12 +36,12 @@
                 <p>Depending on applicable law, you may request access, correction, deletion, withdrawal of consent where applicable, or lodge a complaint with a data protection authority. Contact us for requests that cannot be handled in the interface.</p>
                 <h3>11. Changes to This Policy</h3>
                 <p>This policy may be updated as NCP, its providers, or legal requirements change. The current version is published with its effective date.</p>
-                <h3>12. Contact</h3>
-                <p>Next Cube Pro<br>Email: [insert a working project email address]<br>Website: https://nextcubepro.com</p>`
+                <h3>12. Support</h3>
+                <p>Next Cube Pro<br>Support email: <a href="mailto:support@nextcubepro.com">support@nextcubepro.com</a><br>Website: https://nextcubepro.com</p>`
         },
         ru: {
             title: 'Политика конфиденциальности Next Cube Pro',
-            meta: 'Дата вступления в силу: [укажите дату публикации] · Сайт: https://nextcubepro.com · Контакт: [укажите рабочий адрес электронной почты проекта]',
+            meta: 'Дата вступления в силу: 27.10.2026 · Сайт: https://nextcubepro.com · Служба поддержки: support@nextcubepro.com',
             html: `
                 <h3>1. Общие положения</h3>
                 <p>Next Cube Pro (NCP, «сайт» или «сервис») — онлайн-сервис для спидкубинга с таймером, историей сборок, статистикой и глобальной таблицей лидеров.</p>
@@ -73,8 +73,8 @@
                 <p>В зависимости от закона пользователь может запросить доступ, исправление или удаление данных, отозвать согласие в применимых случаях либо обратиться в компетентный орган. Для остальных запросов свяжитесь с нами.</p>
                 <h3>11. Изменения политики</h3>
                 <p>Политика может обновляться при изменении NCP, провайдеров или законодательства. Актуальная версия публикуется с датой вступления в силу.</p>
-                <h3>12. Контакты</h3>
-                <p>Next Cube Pro<br>Электронная почта: [укажите рабочий адрес электронной почты проекта]<br>Сайт: https://nextcubepro.com</p>`
+                <h3>12. Служба поддержки</h3>
+                <p>Next Cube Pro<br>Электронная почта службы поддержки: <a href="mailto:support@nextcubepro.com">support@nextcubepro.com</a><br>Сайт: https://nextcubepro.com</p>`
         }
     };
 
