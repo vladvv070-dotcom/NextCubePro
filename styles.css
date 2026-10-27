@@ -6501,9 +6501,9 @@ body.light-theme .shop-confirm-overlay{background:rgba(226,232,240,.45)}body.lig
 .timer-container.timer-fluid-hover-host{isolation:isolate}
 .timer-container.timer-fluid-hover-host .timer-display{z-index:2}
 .timer-container.fluid-text-hover-fallback .timer-display.timer-skin-fluid-hover:not(.inspection-countdown){background:linear-gradient(105deg,#1b1b1b,#b7b7b7,#282828,#f4f4f4,#252525);background-size:220% 100%;background-clip:text;-webkit-background-clip:text;color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none;animation:metalFxPreviewGlint 4s linear infinite}
-.fluid-text-hover-preview.fluid-text-hover-fallback{color:#9da8bb;font:700 2rem/1 var(--timer-skin-font-family,inherit);letter-spacing:inherit}
-.fluid-text-hover-preview.fluid-text-hover-fallback .fluid-hover-mask-text{background:linear-gradient(105deg,#171717,#d7d7d7,#282828,#fff,#282828);background-size:220% 100%;background-clip:text;-webkit-background-clip:text;color:transparent;-webkit-text-fill-color:transparent;text-shadow:0 0 .3em rgba(255,255,255,.45);animation:metalFxPreviewGlint 4s linear infinite}
-.fluid-text-hover-preview:not(.fluid-text-hover-fallback) .fluid-hover-mask-text{opacity:0}
+.fluid-text-hover-preview{position:relative;display:grid;width:100%;height:112px;min-height:112px;place-items:center;overflow:hidden}
+.fluid-text-hover-preview .fluid-hover-mask-text{position:relative;z-index:1;font:700 clamp(2rem,3vw,2.7rem)/1 var(--timer-skin-font-family,inherit);letter-spacing:inherit;background:linear-gradient(105deg,#171717,#d7d7d7,#282828,#fff,#282828);background-size:220% 100%;background-clip:text;-webkit-background-clip:text;color:transparent;-webkit-text-fill-color:transparent;text-shadow:0 0 .3em rgba(255,255,255,.45);animation:metalFxPreviewGlint 4s linear infinite}
+.fluid-text-hover-preview.fluid-text-hover-fallback .fluid-hover-mask-text{color:#d7d7d7;-webkit-text-fill-color:#d7d7d7;text-shadow:0 0 .18em rgba(255,255,255,.55)}
 .fluid-text-hover-canvas{position:absolute;inset:0;z-index:3;width:100%;height:100%;pointer-events:none}
 .shop-skin-card{grid-template-columns:minmax(190px,230px) minmax(0,1fr) auto;padding:1rem;gap:1.1rem}
 .shop-skin-preview{min-height:112px}
